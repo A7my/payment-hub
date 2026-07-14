@@ -7,6 +7,7 @@ namespace Mifatoyeh\LaravelPaymentFramework\Managers;
 use Closure;
 use Illuminate\Support\Manager;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\PaymentDriverContract;
+use Mifatoyeh\LaravelPaymentFramework\Drivers\PaymentDriverProxy;
 use Mifatoyeh\LaravelPaymentFramework\Exceptions\DriverNotFoundException;
 use Mifatoyeh\LaravelPaymentFramework\Exceptions\InvalidConfigurationException;
 
@@ -147,6 +148,15 @@ class PaymentManager extends Manager
     /**
      * Resolve a driver from the payment config and validate the result.
      *
+     * The validated instance is wrapped in {@see PaymentDriverProxy} before
+     * being returned, so callers may invoke any driver method with either a
+     * DTO (as today) or a plain array. This is purely an outer convenience
+     * layer: config validation, container resolution, and the driver
+     * instance itself are completely unaffected — the wrapped driver still
+     * only ever receives DTOs. Drivers registered via {@see self::extend()}
+     * are intentionally NOT wrapped, since that path is meant to hand back
+     * the exact instance the caller registered (e.g. FakePaymentDriver in tests).
+     *
      * @param string $driver Driver name key.
      *
      * @throws DriverNotFoundException       When no config block is registered for the driver name.
@@ -174,7 +184,7 @@ class PaymentManager extends Manager
         // Resolve via container — allows constructor DI in driver implementations.
         $instance = $this->container->make($config['class'], ['config' => $config]);
 
-        return $this->assertDriverContract($instance, $driver);
+        return new PaymentDriverProxy($this->assertDriverContract($instance, $driver));
     }
 
     /**
