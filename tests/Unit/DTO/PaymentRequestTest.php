@@ -332,6 +332,39 @@ class PaymentRequestTest extends TestCase
     }
 
     /** @test */
+    public function test_options_defaults_to_empty_array(): void
+    {
+        $request = new PaymentRequest(
+            amount: $this->makeMoney(),
+            currency: Currency::USD,
+            idempotencyKey: 'options-default',
+            customer: $this->makeCustomer(),
+        );
+
+        $this->assertSame([], $request->options);
+    }
+
+    /** @test */
+    public function test_options_preserves_gateway_specific_data_verbatim(): void
+    {
+        $options = [
+            'automatic_payment_methods' => ['enabled' => true, 'allow_redirects' => 'never'],
+            'capture_method'            => 'manual',
+            'setup_future_usage'        => 'off_session',
+        ];
+
+        $request = new PaymentRequest(
+            amount: $this->makeMoney(),
+            currency: Currency::USD,
+            idempotencyKey: 'options-verbatim',
+            customer: $this->makeCustomer(),
+            options: $options,
+        );
+
+        $this->assertSame($options, $request->options);
+    }
+
+    /** @test */
     public function test_properties_are_readonly(): void
     {
         $request    = new PaymentRequest(

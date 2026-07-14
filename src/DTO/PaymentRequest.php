@@ -43,6 +43,14 @@ final readonly class PaymentRequest implements JsonSerializable
      * @param array<string, mixed> $metadata Arbitrary key-value metadata forwarded to the provider.
      * @param Token|null     $token          Provider-issued token for saved-card / token-based charges.
      * @param PaymentMethod  $paymentMethod  The intended payment method.
+     * @param array<string, mixed> $options  Gateway-specific options with no dedicated framework
+     *                                       property (e.g. Stripe's `automatic_payment_methods`,
+     *                                       `capture_method`, `setup_future_usage`). Forwarded
+     *                                       verbatim to the provider by the driver; the framework
+     *                                       never inspects or validates its contents. This keeps
+     *                                       provider-specific parameters out of the shared DTO
+     *                                       while still reaching the provider untouched. The same
+     *                                       mechanism is intended for every driver, not just Stripe.
      *
      * @throws InvalidArgumentException When $idempotencyKey is empty.
      * @throws InvalidArgumentException When $amount->currency !== $currency.
@@ -59,6 +67,7 @@ final readonly class PaymentRequest implements JsonSerializable
         public array $metadata = [],
         public ?Token $token = null,
         public PaymentMethod $paymentMethod = PaymentMethod::Card,
+        public array $options = [],
     ) {
         if ($this->idempotencyKey === '') {
             throw new InvalidArgumentException(
@@ -131,6 +140,7 @@ final readonly class PaymentRequest implements JsonSerializable
             'cancel_url'      => $this->cancelUrl,
             'has_token'       => $this->hasToken(),
             'metadata'        => $this->metadata,
+            'options'         => $this->options,
         ];
     }
 }

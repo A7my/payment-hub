@@ -47,6 +47,17 @@ final class StripeClient
      * calls (via {@see \Mifatoyeh\LaravelPaymentFramework\Drivers\AbstractDriver::withRetry()})
      * are safe against duplicate charges on Stripe's side too.
      *
+     * `$request->options` — arbitrary Stripe parameters with no dedicated
+     * framework DTO property (`automatic_payment_methods`, `capture_method`,
+     * `setup_future_usage`, `receipt_email`, `shipping`, or any future Stripe
+     * parameter) — are merged in verbatim, forwarding them to Stripe
+     * untouched. This class never hardcodes or special-cases any of them.
+     * Framework-derived values (`amount`, `currency`, `confirm`,
+     * `payment_method`, `metadata`) always win on key collision: `$params`
+     * is merged SECOND, since PHP's `array_merge()` lets the later array's
+     * values overwrite the earlier one's for matching string keys. A caller
+     * cannot use `options` to override the amount actually charged.
+     *
      * Performs no interpretation of the result or of any exception raised —
      * both are simply propagated to the caller.
      *
@@ -68,6 +79,10 @@ final class StripeClient
             ],
             static fn (mixed $value): bool => $value !== null && $value !== [],
         );
+
+        // Provider-specific options first, framework-derived $params second —
+        // framework values must always win on key collision.
+        $params = array_merge($request->options, $params);
 
         $intent = $this->sdk()->paymentIntents->create(
             $params,

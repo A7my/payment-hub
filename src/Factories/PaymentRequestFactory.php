@@ -45,9 +45,41 @@ use Mifatoyeh\LaravelPaymentFramework\ValueObjects\TransactionId;
  * etc.) still applies — this factory only performs the array → object
  * translation and raises a clear {@see InvalidArgumentException} when a
  * required array key is missing, before that translation is attempted.
+ *
+ * Provider-specific options:
+ * Array input may contain gateway-specific keys with no dedicated DTO
+ * property (e.g. Stripe's `automatic_payment_methods`, `capture_method`,
+ * `setup_future_usage`). Rather than silently discarding them or growing
+ * the DTO with dozens of provider-specific properties, every top-level key
+ * NOT recognised as a framework field is automatically collected into
+ * `PaymentRequest::$options` and forwarded to the driver untouched — see
+ * {@see self::extractOptions()}. This mechanism is generic and reusable by
+ * every gateway (Stripe, PayPal, Paymob, MyFatoorah, …), not Stripe-specific.
  */
 final class PaymentRequestFactory
 {
+    /**
+     * Top-level array keys consumed by {@see self::toPaymentRequest()} that
+     * populate a dedicated PaymentRequest property. Every other top-level
+     * key is collected into `PaymentRequest::$options` instead of being lost.
+     *
+     * @var array<int, string>
+     */
+    private const PAYMENT_REQUEST_KNOWN_KEYS = [
+        'amount',
+        'currency',
+        'idempotency_key',
+        'customer',
+        'order',
+        'billing_address',
+        'address',
+        'return_url',
+        'cancel_url',
+        'metadata',
+        'token',
+        'payment_method',
+    ];
+
     /**
      * Build (or pass through) a PaymentRequest for charge()/authorize().
      *
@@ -77,6 +109,7 @@ final class PaymentRequestFactory
             metadata: (array) ($data['metadata'] ?? []),
             token: isset($data['token']) ? Token::fromString((string) $data['token']) : null,
             paymentMethod: $this->paymentMethod($data['payment_method'] ?? null),
+            options: $this->extractOptions($data, self::PAYMENT_REQUEST_KNOWN_KEYS),
         );
     }
 
@@ -330,6 +363,23 @@ final class PaymentRequestFactory
             country: (string) $data['country'],
             postalCode: (string) $data['postal_code'],
         );
+    }
+
+    /**
+     * Collect every top-level array key NOT in $knownKeys into a plain array.
+     *
+     * Generic, gateway-agnostic mechanism: any driver's factory method can
+     * call this with its own known-keys list to give callers a provider
+     * options bag without adding provider-specific properties to a DTO.
+     *
+     * @param array<string, mixed> $data
+     * @param array<int, string>   $knownKeys
+     *
+     * @return array<string, mixed>
+     */
+    private function extractOptions(array $data, array $knownKeys): array
+    {
+        return array_diff_key($data, array_flip($knownKeys));
     }
 
     private function currency(string|Currency $value): Currency
