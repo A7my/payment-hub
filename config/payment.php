@@ -2,7 +2,8 @@
 
 declare(strict_types=1);
 
-use Mifatoyeh\LaravelPaymentFramework\Enums\Environment;
+    use Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe\StripeDriver;
+    use Mifatoyeh\LaravelPaymentFramework\Enums\Environment;
 
 /**
  * Laravel Payment Framework — Configuration File
@@ -43,9 +44,9 @@ return [
 
         'stripe' => [
             // The fully-qualified class name of the driver implementation.
-            // The driver class must be provided by a separate driver package
-            // (e.g. mifatoyeh/laravel-stripe-driver).
-            'class'          => env('STRIPE_DRIVER_CLASS', 'YourVendor\\StripeDriver\\StripeDriver'),
+            // Ships built-in with this package — override only if you need
+            // to substitute a custom Stripe driver implementation.
+            'class'          => env('STRIPE_DRIVER_CLASS', StripeDriver::class),
 
             // Provider API credentials — never hardcode these values.
             'key'            => env('STRIPE_KEY'),
