@@ -2,8 +2,7 @@
 
 declare(strict_types=1);
 
-    use Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe\StripeDriver;
-    use Mifatoyeh\LaravelPaymentFramework\Enums\Environment;
+use Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe\StripeDriver;
 
 /**
  * Laravel Payment Framework — Configuration File
@@ -32,21 +31,21 @@ return [
     | Payment Drivers
     |--------------------------------------------------------------------------
     |
-    | Each driver block configures a specific payment provider. You may define
-    | multiple instances of the same provider (e.g. stripe_usd, stripe_eur) to
-    | use different credentials simultaneously.
+    | Each driver block configures a specific payment provider. The driver
+    | `class` is a built-in implementation detail of this package — it is
+    | NOT configurable via .env. Only credentials and behavioural settings
+    | (sandbox, timeout) are.
     |
     | Required keys per driver: class, webhook_secret
-    | Optional keys: sandbox, environment, timeout, currencies
+    | Optional keys: sandbox, timeout
     |
     */
     'drivers' => [
 
         'stripe' => [
-            // The fully-qualified class name of the driver implementation.
-            // Ships built-in with this package — override only if you need
-            // to substitute a custom Stripe driver implementation.
-            'class'          => env('STRIPE_DRIVER_CLASS', StripeDriver::class),
+            // The built-in Stripe driver implementation. Not configurable —
+            // driver classes are an internal detail of this package.
+            'class'          => StripeDriver::class,
 
             // Provider API credentials — never hardcode these values.
             'key'            => env('STRIPE_KEY'),
@@ -58,20 +57,9 @@ return [
             // When true, the driver targets the provider's sandbox/test endpoint.
             'sandbox'        => env('PAYMENT_SANDBOX', true),
 
-            // Canonical environment enum value (derived from sandbox flag above).
-            'environment'    => env('PAYMENT_SANDBOX', true)
-                ? Environment::Sandbox
-                : Environment::Production,
-
             // HTTP request timeout in seconds.
             'timeout'        => (int) env('PAYMENT_TIMEOUT', 30),
-
-            // Currencies accepted by this driver instance.
-            'currencies'     => ['USD', 'EUR', 'GBP'],
         ],
-
-        // Add additional driver blocks here following the same structure.
-        // Example: 'paypal' => [ 'class' => ..., 'client_id' => ..., ... ]
 
     ],
 
@@ -149,7 +137,6 @@ return [
     */
     'repository' => [
         'enabled' => env('PAYMENT_REPOSITORY_ENABLED', false),
-        'model'   => \Mifatoyeh\LaravelPaymentFramework\Repositories\PaymentTransaction::class,
     ],
 
 ];
