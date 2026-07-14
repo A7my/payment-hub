@@ -1,0 +1,13 @@
+/vendor/
+composer.phar
+.phpunit.result.cache
+.phpunit.cache/
+/build/
+/coverage/
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/settings.json
