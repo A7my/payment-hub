@@ -1,5 +1,5 @@
 {
-    "name": "mifatoyeh/laravel-payment-framework",
+    "name": "a7my/payment-hub",
     "description": "Enterprise-grade provider-agnostic payment framework for Laravel 12+",
     "type": "library",
     "license": "MIT",
