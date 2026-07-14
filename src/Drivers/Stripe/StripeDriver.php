@@ -51,32 +51,55 @@ use Throwable;
  * dispatch lifecycle events, delegate to the collaborators above, and wrap
  * failures. It never talks to the Stripe SDK directly.
  *
+ * Collaborators are PRIVATE implementation details of this driver, not
+ * container-resolved services. The IoC container resolves ONLY this class
+ * (via `PaymentManager`); `StripeClient`, `StripeMapper`,
+ * `StripeWebhookVerifier`, and `StripeExceptionMapper` are constructed here,
+ * directly, from the same `$config` array this driver itself receives. This
+ * matters concretely: `StripeClient` and `StripeWebhookVerifier` both need
+ * the resolved `payment.drivers.stripe` config (the secret key, the webhook
+ * secret) to function — if the container resolved them independently, each
+ * would receive its own default-constructed `[]` instead of that config,
+ * and `StripeClient` would fail with "api_key cannot be the empty string"
+ * even when `STRIPE_SECRET` is correctly set. Building them here guarantees
+ * every collaborator shares the exact same config this driver was given.
+ * Every other concrete driver (PayPal, Paymob, MyFatoorah, …) follows this
+ * same pattern.
+ *
  * `charge()` is fully implemented. Every other method body is intentionally
  * left as a `// TODO` stub, to be implemented in a later task.
  */
 final class StripeDriver extends AbstractDriver implements PaymentDriverContract
 {
+    private readonly StripeClient $client;
+
+    private readonly StripeMapper $mapper;
+
+    private readonly StripeWebhookVerifier $webhookVerifier;
+
+    private readonly StripeExceptionMapper $exceptionMapper;
+
     /**
-     * @param PaymentLoggerContract  $logger           The bound logger implementation.
-     * @param Dispatcher             $events            Laravel's event dispatcher.
-     * @param RetryServiceContract   $retry             The retry service for transient failure handling.
-     * @param StripeClient           $client            Raw Stripe SDK communication wrapper.
-     * @param StripeMapper           $mapper            Stripe payload → framework Response translator.
-     * @param StripeWebhookVerifier  $webhookVerifier   Stripe webhook signature verifier.
-     * @param StripeExceptionMapper  $exceptionMapper   Stripe SDK exception → framework exception translator.
-     * @param array<string, mixed>   $config            The driver's config block from payment.drivers.stripe.
+     * @param PaymentLoggerContract $logger  The bound logger implementation.
+     * @param Dispatcher            $events  Laravel's event dispatcher.
+     * @param RetryServiceContract  $retry   The retry service for transient failure handling.
+     * @param array<string, mixed>  $config  The driver's config block from payment.drivers.stripe
+     *                                       (secret key, webhook secret, sandbox flag, timeout, etc.).
      */
     public function __construct(
         PaymentLoggerContract $logger,
         Dispatcher $events,
         RetryServiceContract $retry,
-        private readonly StripeClient $client,
-        private readonly StripeMapper $mapper,
-        private readonly StripeWebhookVerifier $webhookVerifier,
-        private readonly StripeExceptionMapper $exceptionMapper,
         array $config = [],
     ) {
         parent::__construct($logger, $events, $retry, $config);
+
+        // Internal collaborators — constructed here, not container-resolved,
+        // so every one of them shares this exact same $config array.
+        $this->client          = new StripeClient($config);
+        $this->mapper          = new StripeMapper();
+        $this->webhookVerifier = new StripeWebhookVerifier($config);
+        $this->exceptionMapper = new StripeExceptionMapper();
     }
 
     /**

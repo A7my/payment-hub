@@ -8,11 +8,7 @@ use Illuminate\Contracts\Events\Dispatcher;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Services\RetryServiceContract;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CustomerData;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentRequest;
-use Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe\StripeClient;
 use Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe\StripeDriver;
-use Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe\StripeExceptionMapper;
-use Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe\StripeMapper;
-use Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe\StripeWebhookVerifier;
 use Mifatoyeh\LaravelPaymentFramework\Enums\Currency;
 use Mifatoyeh\LaravelPaymentFramework\Enums\PaymentStatus;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentFailed;
@@ -56,14 +52,14 @@ final class StripeDriverChargeTest extends TestCase
 
     private function makeDriver(?RetryServiceContract $retry = null): StripeDriver
     {
+        // StripeDriver builds its own StripeClient/StripeMapper/StripeWebhookVerifier/
+        // StripeExceptionMapper internally from this same $config array — they are
+        // no longer constructor-injected collaborators.
         return new StripeDriver(
             new NullLogger(),
             $this->events,
             $retry ?? new RetryService(1, 0, true),
-            new StripeClient(['secret' => 'sk_test_dummy_key']),
-            new StripeMapper(),
-            new StripeWebhookVerifier(['webhook_secret' => 'whsec_dummy']),
-            new StripeExceptionMapper(),
+            ['secret' => 'sk_test_dummy_key', 'webhook_secret' => 'whsec_dummy'],
         );
     }
 
