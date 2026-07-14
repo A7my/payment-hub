@@ -66,8 +66,9 @@ use Throwable;
  * Every other concrete driver (PayPal, Paymob, MyFatoorah, …) follows this
  * same pattern.
  *
- * `charge()` is fully implemented. Every other method body is intentionally
- * left as a `// TODO` stub, to be implemented in a later task.
+ * `charge()` and `authorize()` are fully implemented. Every other method
+ * body is intentionally left as a `// TODO` stub, to be implemented in a
+ * later task.
  */
 final class StripeDriver extends AbstractDriver implements PaymentDriverContract
 {
@@ -201,13 +202,62 @@ final class StripeDriver extends AbstractDriver implements PaymentDriverContract
         ];
     }
 
-    /** {@inheritDoc} */
+    /**
+     * {@inheritDoc}
+     *
+     * Identical orchestration to {@see self::charge()} — same idempotency
+     * check, logging, event dispatch, retry wrapping, decline handling, and
+     * exception mapping — except the underlying PaymentIntent is created via
+     * {@see StripeClient::createAuthorization()} (`capture_method: manual`)
+     * so funds are reserved but not captured. Reuses
+     * {@see StripeMapper::toPaymentResponse()} unchanged: it already maps
+     * Stripe's `requires_capture` status to `PaymentStatus::Authorized`.
+     */
     public function authorize(PaymentRequest $request): PaymentResponse
     {
-        // TODO: Same orchestration shape as charge(), but delegates to a
-        //       Stripe PaymentIntent created with capture_method=manual, and
-        //       dispatches PaymentInitiated / PaymentSucceeded / PaymentFailed.
-        throw new \LogicException('StripeDriver::authorize() not yet implemented.');
+        $this->validateIdempotencyKey($request->idempotencyKey);
+        $this->logInfo('Initiating authorization', $this->buildLogContext('authorize', [
+            'amount'   => $request->amount->amount,
+            'currency' => $request->currency->value,
+        ]));
+        $this->dispatchEvent(new PaymentInitiated($request));
+
+        try {
+            $raw      = $this->withRetry(fn () => $this->client->createAuthorization($request));
+            $response = $this->mapper->toPaymentResponse($raw);
+
+            if ($response->isSuccessful()) {
+                $this->dispatchEvent(new PaymentSucceeded($request, $response));
+                $this->logInfo('Authorization succeeded', $this->buildLogContext('authorize', [
+                    'transaction_id' => $response->getTransactionId()->toString(),
+                    'status'         => $response->getStatus()->value,
+                ]));
+            } else {
+                $this->dispatchEvent(new PaymentFailed($request, $response, null));
+                $this->logWarning('Authorization did not succeed', $this->buildLogContext('authorize', [
+                    'status'  => $response->getStatus()->value,
+                    'message' => $response->getMessage(),
+                ]));
+            }
+
+            return $response;
+        } catch (CardException $e) {
+            $response = $this->mapper->toPaymentResponse($this->declinedPaymentIntentFrom($e, $request));
+            $this->dispatchEvent(new PaymentFailed($request, $response, null));
+            $this->logWarning('Authorization declined by Stripe', $this->buildLogContext('authorize', [
+                'decline_code' => $e->getDeclineCode(),
+                'message'      => $e->getMessage(),
+            ]));
+
+            return $response;
+        } catch (Throwable $e) {
+            $this->dispatchEvent(new PaymentFailed($request, null, $e));
+            $this->logError('Authorization failed', $this->buildLogContext('authorize', [
+                'error' => $e->getMessage(),
+            ]));
+
+            throw $this->exceptionMapper->map($e, ['operation' => 'authorize']);
+        }
     }
 
     /** {@inheritDoc} */

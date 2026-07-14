@@ -69,27 +69,82 @@ final class StripeClient
      */
     public function createPaymentIntent(PaymentRequest $request): array
     {
+        $intent = $this->sdk()->paymentIntents->create(
+            $this->buildPaymentIntentParams($request),
+            ['idempotency_key' => $request->idempotencyKey],
+        );
+
+        return $intent->toArray();
+    }
+
+    /**
+     * Create a Stripe PaymentIntent with `capture_method: manual` — funds are
+     * authorised (reserved) but not captured, for {@see StripeDriver::authorize()}.
+     *
+     * Identical to {@see self::createPaymentIntent()} in every other respect
+     * (still confirms immediately, still forwards the idempotency key and
+     * `$request->options` the same way). `capture_method` is a framework-level
+     * semantic distinction between authorize() and charge() — not something a
+     * caller chooses per-call via options — so, like `confirm`, it is always
+     * set here and always wins over a conflicting option.
+     *
+     * @param PaymentRequest $request The payment request to authorize.
+     *
+     * @return array<string, mixed> The raw, decoded Stripe PaymentIntent payload.
+     *
+     * @throws \Stripe\Exception\ApiErrorException On any Stripe API error (including card declines).
+     */
+    public function createAuthorization(PaymentRequest $request): array
+    {
+        $intent = $this->sdk()->paymentIntents->create(
+            $this->buildPaymentIntentParams($request, ['capture_method' => 'manual']),
+            ['idempotency_key' => $request->idempotencyKey],
+        );
+
+        return $intent->toArray();
+    }
+
+    /**
+     * Build the Stripe PaymentIntent params shared by {@see self::createPaymentIntent()}
+     * and {@see self::createAuthorization()}.
+     *
+     * `$request->options` — arbitrary Stripe parameters with no dedicated
+     * framework DTO property (`automatic_payment_methods`, `setup_future_usage`,
+     * `receipt_email`, `shipping`, or any future Stripe parameter) — are
+     * merged in verbatim, forwarding them to Stripe untouched. This class
+     * never hardcodes or special-cases any of them. Framework-derived values
+     * (`amount`, `currency`, `confirm`, `capture_method`, `payment_method`,
+     * `metadata`) always win on key collision: `$params` is merged SECOND,
+     * since PHP's `array_merge()` lets the later array's values overwrite the
+     * earlier one's for matching string keys. A caller cannot use `options`
+     * to override the amount actually charged or force auto-capture on an
+     * authorize() call.
+     *
+     * @param PaymentRequest        $request The payment request being charged or authorized.
+     * @param array<string, mixed>  $extra   Additional framework-derived params for this specific
+     *                                       operation (e.g. `capture_method` for authorize()).
+     *
+     * @return array<string, mixed>
+     */
+    private function buildPaymentIntentParams(PaymentRequest $request, array $extra = []): array
+    {
         $params = array_filter(
-            [
-                'amount'          => $request->amount->amount,
-                'currency'        => strtolower($request->currency->value),
-                'confirm'         => true,
-                'payment_method'  => $request->token?->toString(),
-                'metadata'        => $request->metadata,
-            ],
+            array_merge(
+                [
+                    'amount'          => $request->amount->amount,
+                    'currency'        => strtolower($request->currency->value),
+                    'confirm'         => true,
+                    'payment_method'  => $request->token?->toString(),
+                    'metadata'        => $request->metadata,
+                ],
+                $extra,
+            ),
             static fn (mixed $value): bool => $value !== null && $value !== [],
         );
 
         // Provider-specific options first, framework-derived $params second —
         // framework values must always win on key collision.
-        $params = array_merge($request->options, $params);
-
-        $intent = $this->sdk()->paymentIntents->create(
-            $params,
-            ['idempotency_key' => $request->idempotencyKey],
-        );
-
-        return $intent->toArray();
+        return array_merge($request->options, $params);
     }
 
     /**

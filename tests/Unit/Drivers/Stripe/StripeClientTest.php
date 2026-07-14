@@ -14,10 +14,10 @@ use Stripe\ApiRequestor;
 use Stripe\HttpClient\ClientInterface;
 
 /**
- * Unit tests for StripeClient::createPaymentIntent(), focused on the
- * provider-options pipeline: PaymentRequest::$options must reach Stripe
- * verbatim, and framework-derived values (amount, currency, confirm,
- * metadata) must always win over a conflicting option.
+ * Unit tests for StripeClient::createPaymentIntent() and createAuthorization(),
+ * focused on the provider-options pipeline: PaymentRequest::$options must
+ * reach Stripe verbatim, and framework-derived values (amount, currency,
+ * confirm, capture_method, metadata) must always win over a conflicting option.
  *
  * Stripe HTTP traffic is intercepted via the SDK's own ClientInterface seam
  * (same pattern as StripeDriverChargeTest) — no real network call is made.
@@ -157,6 +157,69 @@ final class StripeClientTest extends TestCase
         $this->assertSame(1000, $sent['amount']);
         $this->assertSame(['order_id' => 123], $sent['metadata']);
         $this->assertSame('ACME SHOP', $sent['statement_descriptor']);
+    }
+
+    // =========================================================================
+    // createAuthorization() — capture_method: manual
+    // =========================================================================
+
+    /** @test */
+    public function test_create_authorization_sets_capture_method_to_manual(): void
+    {
+        $client = new CapturingHttpClient($this->successResponse());
+        ApiRequestor::setHttpClient($client);
+
+        (new StripeClient(['secret' => 'sk_test_dummy']))->createAuthorization($this->makeRequest());
+
+        $sent = $client->paramsSent[0];
+
+        $this->assertSame(1000, $sent['amount']);
+        $this->assertSame('usd', $sent['currency']);
+        $this->assertSame('true', $sent['confirm']);
+        $this->assertSame('manual', $sent['capture_method']);
+    }
+
+    /** @test */
+    public function test_create_authorization_capture_method_cannot_be_overridden_by_options(): void
+    {
+        $client = new CapturingHttpClient($this->successResponse());
+        ApiRequestor::setHttpClient($client);
+
+        (new StripeClient(['secret' => 'sk_test_dummy']))->createAuthorization(
+            $this->makeRequest(options: ['capture_method' => 'automatic']),
+        );
+
+        $sent = $client->paramsSent[0];
+
+        $this->assertSame('manual', $sent['capture_method']);
+    }
+
+    /** @test */
+    public function test_create_authorization_forwards_provider_options(): void
+    {
+        $client = new CapturingHttpClient($this->successResponse());
+        ApiRequestor::setHttpClient($client);
+
+        (new StripeClient(['secret' => 'sk_test_dummy']))->createAuthorization(
+            $this->makeRequest(options: ['statement_descriptor' => 'ACME HOLD']),
+        );
+
+        $sent = $client->paramsSent[0];
+
+        $this->assertSame('ACME HOLD', $sent['statement_descriptor']);
+    }
+
+    /** @test */
+    public function test_create_payment_intent_never_sets_capture_method(): void
+    {
+        // Regression guard: createPaymentIntent() (charge) must remain
+        // auto-capture — capture_method is exclusive to createAuthorization().
+        $client = new CapturingHttpClient($this->successResponse());
+        ApiRequestor::setHttpClient($client);
+
+        (new StripeClient(['secret' => 'sk_test_dummy']))->createPaymentIntent($this->makeRequest());
+
+        $this->assertArrayNotHasKey('capture_method', $client->paramsSent[0]);
     }
 }
 
