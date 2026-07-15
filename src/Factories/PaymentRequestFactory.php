@@ -392,8 +392,17 @@ final class PaymentRequestFactory
         if ($value instanceof PaymentMethod) {
             return $value;
         }
+        if ($value === null) {
+            return PaymentMethod::Card;
+        }
 
-        return $value !== null ? PaymentMethod::from((string) $value) : PaymentMethod::Card;
+        return PaymentMethod::tryFrom((string) $value) ?? throw new InvalidArgumentException(sprintf(
+            "Invalid 'payment_method' value [%s]. Expected one of: %s. " .
+            "To charge a specific saved payment method or provider token " .
+            "(e.g. a Stripe PaymentMethod ID like 'pm_...'), use the 'token' key instead.",
+            $value,
+            implode(', ', array_column(PaymentMethod::cases(), 'value')),
+        ));
     }
 
     private function dateTime(mixed $value): ?DateTimeImmutable

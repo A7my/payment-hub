@@ -15,6 +15,15 @@ use Stringable;
  * - A saved payment method (stored credential / recurring token)
  * - A one-time payment authorisation token
  *
+ * Per-provider examples:
+ * - Stripe: a PaymentMethod ID (e.g. `pm_1N...`, or the test helper
+ *   `pm_card_visa`) — pass it here (via `PaymentRequest::$token`, or the
+ *   `'token'` array key when using array input) to charge that specific
+ *   payment method. Do NOT confuse this with `PaymentRequest::$paymentMethod`
+ *   (the `'payment_method'` array key), which selects a payment method
+ *   *category* (card, wallet, bank_transfer, …) — not a specific Stripe
+ *   PaymentMethod instance.
+ *
  * Design decisions:
  * - The token value is treated as completely opaque. Format, length, and
  *   character set are provider-defined and subject to change.

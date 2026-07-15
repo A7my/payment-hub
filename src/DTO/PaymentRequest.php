@@ -42,7 +42,11 @@ final readonly class PaymentRequest implements JsonSerializable
      * @param string|null    $cancelUrl      URL to redirect the customer after cancelled payment.
      * @param array<string, mixed> $metadata Arbitrary key-value metadata forwarded to the provider.
      * @param Token|null     $token          Provider-issued token for saved-card / token-based charges.
-     * @param PaymentMethod  $paymentMethod  The intended payment method.
+     *                                       For Stripe, this is a PaymentMethod ID (e.g. `pm_...`) —
+     *                                       set it to charge a specific payment method. NOT the same
+     *                                       as $paymentMethod below; see {@see Token}'s docblock.
+     * @param PaymentMethod  $paymentMethod  The intended payment method *category* (card, wallet,
+     *                                       bank_transfer, …) — not a specific provider instance ID.
      * @param array<string, mixed> $options  Gateway-specific options with no dedicated framework
      *                                       property (e.g. Stripe's `automatic_payment_methods`,
      *                                       `capture_method`, `setup_future_usage`). Forwarded

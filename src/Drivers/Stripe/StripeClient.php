@@ -4,7 +4,11 @@ declare(strict_types=1);
 
 namespace Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe;
 
+use Mifatoyeh\LaravelPaymentFramework\DTO\CaptureRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentRequest;
+use Mifatoyeh\LaravelPaymentFramework\DTO\RefundRequest;
+use Mifatoyeh\LaravelPaymentFramework\DTO\TransactionLookupRequest;
+use Mifatoyeh\LaravelPaymentFramework\DTO\VoidRequest;
 use Stripe\StripeClient as StripeSdkClient;
 
 /**
@@ -99,6 +103,191 @@ final class StripeClient
         $intent = $this->sdk()->paymentIntents->create(
             $this->buildPaymentIntentParams($request, ['capture_method' => 'manual']),
             ['idempotency_key' => $request->idempotencyKey],
+        );
+
+        return $intent->toArray();
+    }
+
+    /**
+     * Cancel (void) a Stripe PaymentIntent that has not yet been captured.
+     *
+     * Releases the reserved funds without any settlement. Stripe's cancel
+     * endpoint (`POST /v1/payment_intents/{id}/cancel`) takes the PaymentIntent
+     * id directly — there is no amount, currency, or payment_method to build,
+     * unlike {@see self::createPaymentIntent()}.
+     *
+     * `$request->reason` is intentionally NOT forwarded as Stripe's
+     * `cancellation_reason` parameter: Stripe restricts that field to a fixed
+     * enum (`duplicate`, `fraudulent`, `requested_by_customer`, `abandoned`),
+     * while `VoidRequest::$reason` is free-text audit information. Coercing
+     * arbitrary text into that enum would be business logic this thin wrapper
+     * should not contain; `$request->reason` remains available to
+     * {@see StripeDriver} for logging only.
+     *
+     * Performs no interpretation of the result or of any exception raised —
+     * both are simply propagated to the caller.
+     *
+     * @param VoidRequest $request The void request identifying the transaction to cancel.
+     *
+     * @return array<string, mixed> The raw, decoded Stripe PaymentIntent payload.
+     *
+     * @throws \Stripe\Exception\ApiErrorException On any Stripe API error
+     *         (e.g. InvalidRequestException when the PaymentIntent is not in
+     *         a cancellable state — cancelling never touches a card network,
+     *         so a CardException cannot occur here).
+     */
+    public function cancelPaymentIntent(VoidRequest $request): array
+    {
+        $intent = $this->sdk()->paymentIntents->cancel(
+            $request->transactionId->toString(),
+            [],
+            ['idempotency_key' => $request->idempotencyKey],
+        );
+
+        return $intent->toArray();
+    }
+
+    /**
+     * Capture the funds of a PaymentIntent previously authorised via
+     * {@see self::createAuthorization()} (status `requires_capture`).
+     *
+     * `CaptureRequest::$amount` is always forwarded as Stripe's
+     * `amount_to_capture` — the DTO requires a non-zero amount regardless of
+     * whether the caller intends a full or partial capture (capturing the
+     * full originally-authorised amount vs. less is the caller's choice, not
+     * something this client decides); Stripe treats a full-amount value the
+     * same as omitting the parameter.
+     *
+     * Verified against the Stripe SDK: `PaymentIntentService::capture()` only
+     * documents a generic `ApiErrorException` — capturing does not re-touch
+     * a card network (the hold was already placed at authorize()-time), so
+     * a {@see \Stripe\Exception\CardException} is not a realistic outcome
+     * here. Real capture failures (expired authorisation window — 7 days by
+     * default per Stripe's docs, already-captured/-cancelled PaymentIntent,
+     * amount exceeding the authorised hold) surface as
+     * {@see \Stripe\Exception\InvalidRequestException}.
+     *
+     * Performs no interpretation of the result or of any exception raised —
+     * both are simply propagated to the caller.
+     *
+     * @param CaptureRequest $request The capture request identifying the transaction and amount.
+     *
+     * @return array<string, mixed> The raw, decoded Stripe PaymentIntent payload.
+     *
+     * @throws \Stripe\Exception\ApiErrorException On any Stripe API error.
+     */
+    public function capturePaymentIntent(CaptureRequest $request): array
+    {
+        $intent = $this->sdk()->paymentIntents->capture(
+            $request->transactionId->toString(),
+            ['amount_to_capture' => $request->amount->amount],
+            ['idempotency_key' => $request->idempotencyKey],
+        );
+
+        return $intent->toArray();
+    }
+
+    /**
+     * Create a Stripe Refund for a previously charged/captured PaymentIntent.
+     *
+     * Shared verbatim by both {@see StripeDriver::refund()} and
+     * {@see StripeDriver::partialRefund()} — Stripe's `refunds->create()`
+     * takes the identical `amount` parameter for a full or partial refund
+     * (full vs. partial is not a distinct Stripe API operation), so there is
+     * nothing for this client method to fork on. `RefundRequest::$amount` is
+     * always forwarded as Stripe's `amount`.
+     *
+     * `expand: ['charge']` is always requested so the response embeds the
+     * full Charge object (not just its id) in the SAME API call. The Charge
+     * object — verified against the SDK — carries `amount` (the original
+     * total charged) and `amount_refunded` (the CUMULATIVE amount refunded
+     * across every refund on that charge, per Stripe's own docblock: "can be
+     * less than the amount attribute on the charge if a partial refund was
+     * issued"). {@see StripeMapper::toRefundResponse()} uses these two
+     * fields to correctly distinguish a full refund from a partial one —
+     * including when several partial refunds sum to the total — without a
+     * second API round-trip. Note: `PaymentIntent` itself has NO refund-
+     * related fields at all (verified against the SDK); the Charge is the
+     * only object that tracks this.
+     *
+     * `$request->reason` is intentionally NOT forwarded as Stripe's `reason`
+     * parameter: Stripe restricts that field to a fixed enum (`duplicate`,
+     * `fraudulent`, `requested_by_customer` — a fourth value,
+     * `expired_uncaptured_charge`, is Stripe-generated and not caller-settable),
+     * while `RefundRequest::$reason` is free-text audit information, exactly
+     * the same mismatch as {@see self::cancelPaymentIntent()}'s `reason`
+     * handling. Coercing arbitrary text into that enum would be business
+     * logic this thin wrapper should not contain; `$request->reason` remains
+     * available to {@see StripeDriver} for logging only.
+     *
+     * Verified against the Stripe SDK: `RefundService::create()` only
+     * documents a generic `ApiErrorException` — this is true regardless of
+     * whether the caller conceptually intends a full or partial refund (an
+     * amount exceeding the remaining refundable balance is rejected the same
+     * way for both). There is no dedicated "insufficient balance" exception
+     * class in the SDK — a synchronous refund-creation failure of that kind
+     * surfaces as an {@see \Stripe\Exception\InvalidRequestException} like
+     * any other invalid refund request, already covered by the existing
+     * {@see StripeExceptionMapper} rule. Note that many refund failures are
+     * NOT synchronous at all: a refund can be accepted with `status: pending`
+     * and fail later (reported via `failure_reason`, observable on
+     * subsequent lookup or via webhook) — this method simply reports
+     * whatever status Stripe returns at call time.
+     *
+     * Performs no interpretation of the result or of any exception raised —
+     * both are simply propagated to the caller.
+     *
+     * @param RefundRequest $request The refund request identifying the transaction and amount.
+     *
+     * @return array<string, mixed> The raw, decoded Stripe Refund payload (with `charge` expanded).
+     *
+     * @throws \Stripe\Exception\ApiErrorException On any Stripe API error.
+     */
+    public function createRefund(RefundRequest $request): array
+    {
+        $refund = $this->sdk()->refunds->create(
+            [
+                'payment_intent' => $request->transactionId->toString(),
+                'amount'         => $request->amount->amount,
+                'expand'         => ['charge'],
+            ],
+            ['idempotency_key' => $request->idempotencyKey],
+        );
+
+        return $refund->toArray();
+    }
+
+    /**
+     * Retrieve a PaymentIntent's current state from Stripe.
+     *
+     * Shared verbatim by both {@see StripeDriver::verify()} and
+     * {@see StripeDriver::lookup()} — both need exactly the same data (the
+     * base PaymentIntent, whose `status` field is always populated on a
+     * plain retrieve, verified against the SDK). Neither operation requires
+     * an `expand` param: unlike {@see self::createRefund()}, there is no
+     * nested object needed here — Stripe does not attach a signature or
+     * hash to a PaymentIntent to expand and check (that capability, alluded
+     * to generically in {@see \Mifatoyeh\LaravelPaymentFramework\Responses\VerificationResponse}'s
+     * docblock, targets providers that sign redirect parameters; Stripe does
+     * not). The two driver methods differ only in how they INTERPRET this
+     * same raw payload — see {@see StripeMapper::toVerificationResponse()}
+     * vs {@see StripeMapper::toStatusResponse()}.
+     *
+     * Performs no interpretation of the result or of any exception raised —
+     * both are simply propagated to the caller.
+     *
+     * @param TransactionLookupRequest $request The lookup/verification request identifying the transaction.
+     *
+     * @return array<string, mixed> The raw, decoded Stripe PaymentIntent payload.
+     *
+     * @throws \Stripe\Exception\ApiErrorException On any Stripe API error
+     *         (e.g. InvalidRequestException — HTTP 404 — for an unknown or
+     *         invalid PaymentIntent id).
+     */
+    public function retrievePaymentIntent(TransactionLookupRequest $request): array
+    {
+        $intent = $this->sdk()->paymentIntents->retrieve(
+            $request->transactionId->toString(),
         );
 
         return $intent->toArray();

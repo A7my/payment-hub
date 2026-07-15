@@ -19,9 +19,13 @@ use Mifatoyeh\LaravelPaymentFramework\DTO\TransactionLookupRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\VoidRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\WebhookRequest;
 use Mifatoyeh\LaravelPaymentFramework\Drivers\AbstractDriver;
+use Mifatoyeh\LaravelPaymentFramework\Events\PaymentCaptured;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentFailed;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentInitiated;
+use Mifatoyeh\LaravelPaymentFramework\Events\PaymentRefunded;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentSucceeded;
+use Mifatoyeh\LaravelPaymentFramework\Events\PaymentVoided;
+use Mifatoyeh\LaravelPaymentFramework\Events\TransactionLookuped;
 use Mifatoyeh\LaravelPaymentFramework\Responses\CaptureResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\PaymentLinkResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\PaymentResponse;
@@ -66,9 +70,10 @@ use Throwable;
  * Every other concrete driver (PayPal, Paymob, MyFatoorah, …) follows this
  * same pattern.
  *
- * `charge()` and `authorize()` are fully implemented. Every other method
- * body is intentionally left as a `// TODO` stub, to be implemented in a
- * later task.
+ * `charge()`, `authorize()`, `void()`, `capture()`, `refund()`,
+ * `partialRefund()`, `verify()`, and `lookup()` are fully implemented.
+ * Every other method body is intentionally left as a `// TODO` stub, to
+ * be implemented in a later task.
  */
 final class StripeDriver extends AbstractDriver implements PaymentDriverContract
 {
@@ -260,93 +265,253 @@ final class StripeDriver extends AbstractDriver implements PaymentDriverContract
         }
     }
 
-    /** {@inheritDoc} */
+    /**
+     * {@inheritDoc}
+     *
+     * Same narrower shape as {@see self::void()}: capturing an already
+     * authorised PaymentIntent does not touch a card network, so there is no
+     * {@see CardException} / soft-failure branch. Every Throwable is mapped
+     * via {@see StripeExceptionMapper} and thrown; {@see PaymentCaptured} is
+     * dispatched only after a successful capture.
+     */
     public function capture(CaptureRequest $request): CaptureResponse
     {
-        // TODO: $this->validateIdempotencyKey($request->idempotencyKey);
-        // TODO: $this->logInfo('Capturing payment', $this->buildLogContext('capture'));
-        // TODO: try {
-        //           $raw      = $this->withRetry(fn () => /* $this->client capture call */ null);
-        //           $response = $this->mapper->toCaptureResponse($raw);
-        //           $this->dispatchEvent(new PaymentCaptured($request, $response));
-        //           return $response;
-        //       } catch (\Throwable $e) {
-        //           $this->logError('Capture failed', $this->buildLogContext('capture'));
-        //           throw $this->exceptionMapper->map($e, ['operation' => 'capture']);
-        //       }
-        throw new \LogicException('StripeDriver::capture() not yet implemented.');
+        $this->validateIdempotencyKey($request->idempotencyKey);
+        $this->logInfo('Capturing payment', $this->buildLogContext('capture', [
+            'transaction_id' => $request->transactionId->toString(),
+            'amount'         => $request->amount->amount,
+        ]));
+
+        try {
+            $raw      = $this->withRetry(fn () => $this->client->capturePaymentIntent($request));
+            $response = $this->mapper->toCaptureResponse($raw);
+
+            $this->dispatchEvent(new PaymentCaptured($request, $response));
+            $this->logInfo('Capture succeeded', $this->buildLogContext('capture', [
+                'capture_id' => $response->getCaptureId(),
+                'status'     => $response->getStatus()->value,
+            ]));
+
+            return $response;
+        } catch (Throwable $e) {
+            $this->logError('Capture failed', $this->buildLogContext('capture', [
+                'error' => $e->getMessage(),
+            ]));
+
+            throw $this->exceptionMapper->map($e, ['operation' => 'capture']);
+        }
     }
 
-    /** {@inheritDoc} */
+    /**
+     * {@inheritDoc}
+     *
+     * Simpler orchestration than {@see self::charge()}/{@see self::authorize()}:
+     * Stripe's PaymentIntent cancel endpoint never touches a card network, so
+     * {@see CardException} cannot occur here — there is no soft-failure
+     * branch. Every Throwable is mapped via {@see StripeExceptionMapper} and
+     * thrown; {@see PaymentVoided} is dispatched only after a successful
+     * cancel (there is no `PaymentVoidFailed`-style event to dispatch on the
+     * exception path).
+     */
     public function void(VoidRequest $request): VoidResponse
     {
-        // TODO: $this->validateIdempotencyKey($request->idempotencyKey);
-        // TODO: $this->logInfo('Voiding payment', $this->buildLogContext('void'));
-        // TODO: try {
-        //           $raw      = $this->withRetry(fn () => /* $this->client cancel call */ null);
-        //           $response = $this->mapper->toVoidResponse($raw);
-        //           $this->dispatchEvent(new PaymentVoided($request, $response));
-        //           return $response;
-        //       } catch (\Throwable $e) {
-        //           $this->logError('Void failed', $this->buildLogContext('void'));
-        //           throw $this->exceptionMapper->map($e, ['operation' => 'void']);
-        //       }
-        throw new \LogicException('StripeDriver::void() not yet implemented.');
+        $this->validateIdempotencyKey($request->idempotencyKey);
+        $this->logInfo('Voiding payment', $this->buildLogContext('void', [
+            'transaction_id' => $request->transactionId->toString(),
+            'reason'         => $request->reason,
+        ]));
+
+        try {
+            $raw      = $this->withRetry(fn () => $this->client->cancelPaymentIntent($request));
+            $response = $this->mapper->toVoidResponse($raw);
+
+            $this->dispatchEvent(new PaymentVoided($request, $response));
+            $this->logInfo('Void succeeded', $this->buildLogContext('void', [
+                'transaction_id' => $response->getTransactionId()->toString(),
+                'status'         => $response->getStatus()->value,
+            ]));
+
+            return $response;
+        } catch (Throwable $e) {
+            $this->logError('Void failed', $this->buildLogContext('void', [
+                'error' => $e->getMessage(),
+            ]));
+
+            throw $this->exceptionMapper->map($e, ['operation' => 'void']);
+        }
     }
 
-    /** {@inheritDoc} */
+    /**
+     * {@inheritDoc}
+     *
+     * Same narrower shape as {@see self::void()}/{@see self::capture()}: no
+     * {@see CardException} / soft-failure branch — a refund is a money-
+     * movement operation, not a new card-network authorisation. Every
+     * Throwable is mapped via {@see StripeExceptionMapper} and thrown;
+     * {@see PaymentRefunded} is dispatched after any non-throwing result,
+     * including a `pending` or `requires_action` refund status (not just a
+     * fully `succeeded` one) — those are still legitimate, non-exceptional
+     * outcomes {@see StripeMapper::toRefundResponse()} reports accurately,
+     * and the caller inspects `$response->getStatus()`/`isSuccessful()` to
+     * distinguish them.
+     */
     public function refund(RefundRequest $request): RefundResponse
     {
-        // TODO: $this->validateIdempotencyKey($request->idempotencyKey);
-        // TODO: $this->logInfo('Refunding payment', $this->buildLogContext('refund'));
-        // TODO: try {
-        //           $raw      = $this->withRetry(fn () => /* $this->client refund call */ null);
-        //           $response = $this->mapper->toRefundResponse($raw);
-        //           $this->dispatchEvent(new PaymentRefunded($request, $response));
-        //           return $response;
-        //       } catch (\Throwable $e) {
-        //           $this->logError('Refund failed', $this->buildLogContext('refund'));
-        //           throw $this->exceptionMapper->map($e, ['operation' => 'refund']);
-        //       }
-        throw new \LogicException('StripeDriver::refund() not yet implemented.');
+        $this->validateIdempotencyKey($request->idempotencyKey);
+        $this->logInfo('Refunding payment', $this->buildLogContext('refund', [
+            'transaction_id' => $request->transactionId->toString(),
+            'amount'         => $request->amount->amount,
+            'reason'         => $request->reason,
+        ]));
+
+        try {
+            $raw      = $this->withRetry(fn () => $this->client->createRefund($request));
+            $response = $this->mapper->toRefundResponse($raw);
+
+            $this->dispatchEvent(new PaymentRefunded($request, $response));
+            $this->logInfo('Refund processed', $this->buildLogContext('refund', [
+                'refund_id' => $response->getRefundId(),
+                'status'    => $response->getStatus()->value,
+            ]));
+
+            return $response;
+        } catch (Throwable $e) {
+            $this->logError('Refund failed', $this->buildLogContext('refund', [
+                'error' => $e->getMessage(),
+            ]));
+
+            throw $this->exceptionMapper->map($e, ['operation' => 'refund']);
+        }
     }
 
     /** {@inheritDoc} */
+    /**
+     * {@inheritDoc}
+     *
+     * Same shape as {@see self::refund()}, deliberately — Stripe has no
+     * separate API operation for a partial refund; {@see StripeClient::createRefund()}
+     * (called by both methods, unchanged) forwards `$request->amount`
+     * identically either way. What DOES distinguish a full refund from a
+     * partial one is resolved entirely inside
+     * {@see StripeMapper::toRefundResponse()} from the response payload
+     * itself (via the expanded Charge's cumulative `amount_refunded`), not
+     * by which of these two methods was called — so calling `refund()` with
+     * less than the full amount, or `partialRefund()` with the exact full
+     * remaining amount, both still resolve to the objectively correct
+     * `PaymentStatus`. This method exists as its own driver method only to
+     * satisfy {@see PaymentDriverContract}'s distinct `refund()`/
+     * `partialRefund()` shape and to carry its own log/operation-context
+     * label. Same exception surface as refund() — verified against the
+     * SDK: Stripe rejects an amount exceeding the remaining refundable
+     * balance the same way for a full or partial request, via
+     * {@see \Stripe\Exception\InvalidRequestException}, already covered by
+     * the existing {@see StripeExceptionMapper} rule.
+     */
     public function partialRefund(RefundRequest $request): RefundResponse
     {
-        // TODO: Same orchestration shape as refund(), passing $request->amount
-        //       (less than the original charge) through to the Stripe refund call.
-        throw new \LogicException('StripeDriver::partialRefund() not yet implemented.');
+        $this->validateIdempotencyKey($request->idempotencyKey);
+        $this->logInfo('Partially refunding payment', $this->buildLogContext('partialRefund', [
+            'transaction_id' => $request->transactionId->toString(),
+            'amount'         => $request->amount->amount,
+            'reason'         => $request->reason,
+        ]));
+
+        try {
+            $raw      = $this->withRetry(fn () => $this->client->createRefund($request));
+            $response = $this->mapper->toRefundResponse($raw);
+
+            $this->dispatchEvent(new PaymentRefunded($request, $response));
+            $this->logInfo('Partial refund processed', $this->buildLogContext('partialRefund', [
+                'refund_id' => $response->getRefundId(),
+                'status'    => $response->getStatus()->value,
+            ]));
+
+            return $response;
+        } catch (Throwable $e) {
+            $this->logError('Partial refund failed', $this->buildLogContext('partialRefund', [
+                'error' => $e->getMessage(),
+            ]));
+
+            throw $this->exceptionMapper->map($e, ['operation' => 'partialRefund']);
+        }
     }
 
     /** {@inheritDoc} */
+    /**
+     * {@inheritDoc}
+     *
+     * Read-only — no idempotency key exists on `TransactionLookupRequest`
+     * at all (it carries only `transactionId` and `metadata`), and
+     * {@see AbstractDriver::validateIdempotencyKey()}'s own docblock
+     * enumerates only the mutating methods it must guard; verify() is not
+     * among them. So there is no idempotency check here — not an omission,
+     * there is nothing to validate. No event is dispatched either: the
+     * Events directory has {@see \Mifatoyeh\LaravelPaymentFramework\Events\TransactionLookuped}
+     * for {@see self::lookup()}, but no corresponding event exists for
+     * verify() — inventing one wasn't asked for and nothing consumes it.
+     * The retrieve call is still wrapped in {@see self::withRetry()}
+     * (transient network/5xx errors apply to reads too), and every
+     * Throwable still goes through {@see StripeExceptionMapper} (e.g. an
+     * unknown/invalid transaction id surfaces as
+     * {@see \Stripe\Exception\InvalidRequestException}, HTTP 404).
+     */
     public function verify(TransactionLookupRequest $request): VerificationResponse
     {
-        // TODO: $this->logInfo('Verifying transaction', $this->buildLogContext('verify'));
-        // TODO: try {
-        //           $raw = $this->withRetry(fn () => /* $this->client retrieve call */ null);
-        //           return $this->mapper->toVerificationResponse($raw);
-        //       } catch (\Throwable $e) {
-        //           $this->logError('Verification failed', $this->buildLogContext('verify'));
-        //           throw $this->exceptionMapper->map($e, ['operation' => 'verify']);
-        //       }
-        throw new \LogicException('StripeDriver::verify() not yet implemented.');
+        $this->logInfo('Verifying transaction', $this->buildLogContext('verify', [
+            'transaction_id' => $request->transactionId->toString(),
+        ]));
+
+        try {
+            $raw      = $this->withRetry(fn () => $this->client->retrievePaymentIntent($request));
+            $response = $this->mapper->toVerificationResponse($raw);
+
+            $this->logInfo('Verification completed', $this->buildLogContext('verify', [
+                'verified' => $response->isVerified(),
+            ]));
+
+            return $response;
+        } catch (Throwable $e) {
+            $this->logError('Verification failed', $this->buildLogContext('verify', [
+                'error' => $e->getMessage(),
+            ]));
+
+            throw $this->exceptionMapper->map($e, ['operation' => 'verify']);
+        }
     }
 
     /** {@inheritDoc} */
+    /**
+     * {@inheritDoc}
+     *
+     * Same read-only shape as {@see self::verify()} — no idempotency check,
+     * same reasoning (`TransactionLookupRequest` has no idempotency key).
+     * Unlike verify(), this DOES dispatch
+     * {@see \Mifatoyeh\LaravelPaymentFramework\Events\TransactionLookuped}
+     * on success — that event exists specifically for this operation.
+     */
     public function lookup(TransactionLookupRequest $request): StatusResponse
     {
-        // TODO: $this->logInfo('Looking up transaction', $this->buildLogContext('lookup'));
-        // TODO: try {
-        //           $raw      = $this->withRetry(fn () => /* $this->client retrieve call */ null);
-        //           $response = $this->mapper->toStatusResponse($raw);
-        //           $this->dispatchEvent(new TransactionLookuped($request, $response));
-        //           return $response;
-        //       } catch (\Throwable $e) {
-        //           $this->logError('Lookup failed', $this->buildLogContext('lookup'));
-        //           throw $this->exceptionMapper->map($e, ['operation' => 'lookup']);
-        //       }
-        throw new \LogicException('StripeDriver::lookup() not yet implemented.');
+        $this->logInfo('Looking up transaction', $this->buildLogContext('lookup', [
+            'transaction_id' => $request->transactionId->toString(),
+        ]));
+
+        try {
+            $raw      = $this->withRetry(fn () => $this->client->retrievePaymentIntent($request));
+            $response = $this->mapper->toStatusResponse($raw);
+
+            $this->dispatchEvent(new TransactionLookuped($request, $response));
+            $this->logInfo('Lookup completed', $this->buildLogContext('lookup', [
+                'status' => $response->getStatus()->value,
+            ]));
+
+            return $response;
+        } catch (Throwable $e) {
+            $this->logError('Lookup failed', $this->buildLogContext('lookup', [
+                'error' => $e->getMessage(),
+            ]));
+
+            throw $this->exceptionMapper->map($e, ['operation' => 'lookup']);
+        }
     }
 
     /** {@inheritDoc} */
