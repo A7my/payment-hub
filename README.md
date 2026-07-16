@@ -206,6 +206,28 @@ pricing, and does not create Products/Prices on your behalf.
 
 See the [dedicated walkthrough](#createpaymentlink-walkthrough) below.
 
+```php
+use Mifatoyeh\LaravelPaymentFramework\Facades\Payment;
+   $response = Payment::driver('paymob')->createPaymentLink([
+        'amount'      => 10000,          // amount in smallest unit (cents) → $100.00
+        'currency'    => 'USD',
+        'description' => 'Sandbox test payment',
+        'customer' => [
+            'name'  => 'Mohamed Azmy',
+            'email' => 'azmy@example.com',
+        ],
+        'return_url' => url('/payment/success'),
+        'cancel_url' => url('/payment/cancel'),
+        'metadata' => [
+            'order_id' => 123,
+        ],
+    ]);
+
+    // Redirect to Paymob's hosted iframe checkout page
+    return ($response->getPaymentUrl());
+```php
+
+
 ## createPaymentLink() walkthrough
 
 `createPaymentLink()` itself is a generic driver method (same call shape for
