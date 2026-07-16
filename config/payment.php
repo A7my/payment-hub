@@ -67,9 +67,18 @@ return [
             // driver classes are an internal detail of this package.
             'class'          => PaymobDriver::class,
 
-            // Paymob "secret key" (dashboard: Developers > API Keys), used to
+            // Paymob Egypt/Accept legacy API key — POSTed to /auth/tokens to
             // obtain a short-lived auth token for every request sequence.
+            // Not used in KSA mode (see secret_key below).
             'api_key'        => env('PAYMOB_API_KEY'),
+
+            // Paymob KSA static secret key (Developers > API Keys on the KSA
+            // dashboard). Values begin with 'sau_sk_test_' (sandbox) or
+            // 'sau_sk_live_' (production). When this key is present with either
+            // prefix — OR when base_url contains 'ksa.paymob.com' — the driver
+            // automatically activates KSA mode: it skips /auth/tokens entirely
+            // and attaches Authorization: Bearer <secret_key> to every request.
+            'secret_key'     => env('PAYMOB_SECRET_KEY'),
 
             // Paymob "Integration ID" for the online-card payment method
             // (dashboard: Developers > Payment Integrations). Required for

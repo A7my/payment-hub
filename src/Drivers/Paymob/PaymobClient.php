@@ -92,12 +92,23 @@ final class PaymobClient
      * "don't over-engineer" convention (no cache store dependency is
      * available to a driver).
      *
+     * **KSA mode**: When {@see self::isKsaMode()} is true the `/auth/tokens`
+     * HTTP call is skipped entirely — the KSA platform authenticates via a
+     * static Bearer header on every request (see {@see self::request()}) and
+     * does not expose `/auth/tokens`. The configured `secret_key` is returned
+     * directly and carried through to subsequent calls, but it is never
+     * injected into request bodies (see {@see self::authBody()}).
+     *
      * @return string The auth token to pass to every subsequent call in this sequence.
      *
      * @throws PaymobApiException On any non-2xx Paymob response.
      */
     public function authenticate(): string
     {
+        if ($this->isKsaMode()) {
+            return (string) ($this->config['secret_key'] ?? '');
+        }
+
         $response = $this->request()->post('/auth/tokens', [
             'api_key' => (string) ($this->config['api_key'] ?? ''),
         ]);
@@ -128,7 +139,7 @@ final class PaymobClient
     public function createOrder(string $authToken, int $amountCents, string $currency, string $merchantOrderId): array
     {
         $response = $this->request()->post('/ecommerce/orders', [
-            'auth_token'        => $authToken,
+            ...$this->authBody($authToken),
             'delivery_needed'   => false,
             'amount_cents'      => $amountCents,
             'currency'          => $currency,
@@ -169,7 +180,7 @@ final class PaymobClient
         array $billingData,
     ): array {
         $response = $this->request()->post('/acceptance/payment_keys', [
-            'auth_token'      => $authToken,
+            ...$this->authBody($authToken),
             'amount_cents'    => $amountCents,
             'expiration'      => 3600,
             'order_id'        => $orderId,
@@ -222,7 +233,7 @@ final class PaymobClient
     public function voidTransaction(string $authToken, string $transactionId): array
     {
         $response = $this->request()->post('/acceptance/void_refund/void', [
-            'auth_token'     => $authToken,
+            ...$this->authBody($authToken),
             'transaction_id' => $transactionId,
         ]);
 
@@ -247,7 +258,7 @@ final class PaymobClient
     public function captureTransaction(string $authToken, string $transactionId, int $amountCents): array
     {
         $response = $this->request()->post('/acceptance/capture', [
-            'auth_token'     => $authToken,
+            ...$this->authBody($authToken),
             'transaction_id' => $transactionId,
             'amount_cents'   => $amountCents,
         ]);
@@ -271,7 +282,7 @@ final class PaymobClient
     public function refundTransaction(string $authToken, string $transactionId, int $amountCents): array
     {
         $response = $this->request()->post('/acceptance/void_refund/refund', [
-            'auth_token'     => $authToken,
+            ...$this->authBody($authToken),
             'transaction_id' => $transactionId,
             'amount_cents'   => $amountCents,
         ]);
@@ -287,15 +298,19 @@ final class PaymobClient
      * of GET endpoints taking the auth token as a query parameter rather
      * than a JSON body, since GET requests carry no body.
      *
+     * In KSA mode the `token` query parameter is omitted — authentication is
+     * handled by the `Authorization: Bearer` header injected by
+     * {@see self::request()}.
+     *
      * @return array<string, mixed> The raw, decoded Paymob Transaction payload.
      *
      * @throws PaymobApiException On any non-2xx Paymob response.
      */
     public function retrieveTransaction(string $authToken, string $transactionId): array
     {
-        $response = $this->request()->get("/acceptance/transactions/{$transactionId}", [
-            'token' => $authToken,
-        ]);
+        $queryParams = $this->isKsaMode() ? [] : ['token' => $authToken];
+
+        $response = $this->request()->get("/acceptance/transactions/{$transactionId}", $queryParams);
 
         return $this->decode($response, 'retrieveTransaction');
     }
@@ -349,14 +364,62 @@ final class PaymobClient
     }
 
     /**
+     * Return true when the current config targets Paymob's KSA (Saudi Arabia)
+     * platform — detected by either:
+     *  - `base_url` containing `ksa.paymob.com`, OR
+     *  - `secret_key` starting with the `sau_sk_test_` or `sau_sk_live_` prefix.
+     *
+     * This is the single authoritative definition of the bug condition in
+     * production code. When true, {@see self::authenticate()} skips the
+     * `/auth/tokens` call, {@see self::request()} injects an
+     * `Authorization: Bearer` header, and {@see self::authBody()} returns
+     * an empty array so no `auth_token` field appears in any request body.
+     */
+    private function isKsaMode(): bool
+    {
+        $baseUrl   = (string) ($this->config['base_url'] ?? '');
+        $secretKey = (string) ($this->config['secret_key'] ?? '');
+
+        return str_contains($baseUrl, 'ksa.paymob.com')
+            || str_starts_with($secretKey, 'sau_sk_test_')
+            || str_starts_with($secretKey, 'sau_sk_live_');
+    }
+
+    /**
+     * Build the `auth_token` body fragment for mutating requests.
+     *
+     * Egypt/Accept mode: returns `['auth_token' => $authToken]` to be spread
+     * into the request body.
+     * KSA mode: returns `[]` — the KSA API authenticates via the
+     * `Authorization: Bearer` header injected by {@see self::request()} and
+     * does not accept a body-level token.
+     *
+     * @return array<string, string>
+     */
+    private function authBody(string $authToken): array
+    {
+        return $this->isKsaMode() ? [] : ['auth_token' => $authToken];
+    }
+
+    /**
      * Lazily build a pre-configured pending HTTP request against Paymob's base URL.
+     *
+     * In KSA mode an `Authorization: Bearer <secret_key>` header is added to
+     * every outgoing request via `->withToken()`. In Egypt/Accept mode the
+     * builder is unchanged — auth is handled via body fields instead.
      */
     private function request(): PendingRequest
     {
-        return $this->http
+        $pending = $this->http
             ->baseUrl(rtrim((string) ($this->config['base_url'] ?? 'https://accept.paymob.com/api'), '/'))
             ->timeout((int) ($this->config['timeout'] ?? 30))
             ->acceptJson();
+
+        if ($this->isKsaMode()) {
+            $pending = $pending->withToken((string) ($this->config['secret_key'] ?? ''));
+        }
+
+        return $pending;
     }
 
     /**
