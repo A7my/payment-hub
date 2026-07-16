@@ -124,11 +124,11 @@ final class PaymobKsaBugConditionTest extends TestCase
         $client->createOrder('__any_token__', 1000, 'SAR', 'ord-1');
 
         $http->assertSent(function ($request) use ($config) {
-            $hasAuthToken = isset($request->data()['auth_token']);
-            $this->assertFalse(
-                $hasAuthToken,
+            $authToken = $request->data()['auth_token'] ?? null;
+            $this->assertNull(
+                $authToken,
                 "createOrder() should NOT include auth_token in request body in KSA mode. " .
-                "Counterexample: auth_token='{$request->data()['auth_token']}' found in body for config with secret_key='{$config['secret_key']}'.",
+                "Counterexample: auth_token='{$authToken}' found in body for config with secret_key='{$config['secret_key']}'.",
             );
 
             return true;
