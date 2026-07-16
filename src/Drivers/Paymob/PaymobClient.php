@@ -437,9 +437,21 @@ final class PaymobClient
     /**
      * Lazily build a pre-configured pending HTTP request against Paymob's base URL.
      *
-     * In KSA mode an `Authorization: Bearer <secret_key>` header is added to
-     * every outgoing request via `->withToken()`. In Egypt/Accept mode the
-     * builder is unchanged — auth is handled via body fields instead.
+     * In KSA mode an `Authorization: Token <secret_key>` header is added to
+     * every outgoing request via `->withToken()`. UNVERIFIED but high
+     * confidence: the `Token` scheme (not Laravel's `withToken()` default of
+     * `Bearer`) was chosen after a live 401 came back with the message
+     * "Authentication credentials were not provided." — the exact stock
+     * error Django REST Framework's `TokenAuthentication` returns when no
+     * credentials are found in a scheme it recognises. DRF's
+     * `TokenAuthentication` specifically expects the `Token` prefix, not
+     * `Bearer`; Paymob's KSA API is very likely built on DRF. If this still
+     * 401s, the header scheme is not the (only) remaining problem — check
+     * Paymob's actual KSA API reference for the exact expected auth header,
+     * since this project has no way to verify it independently.
+     *
+     * In Egypt/Accept mode the builder is unchanged — auth is handled via
+     * body fields instead.
      */
     private function request(): PendingRequest
     {
@@ -449,7 +461,7 @@ final class PaymobClient
             ->acceptJson();
 
         if ($this->isKsaMode()) {
-            $pending = $pending->withToken((string) ($this->config['secret_key'] ?? ''));
+            $pending = $pending->withToken((string) ($this->config['secret_key'] ?? ''), 'Token');
         }
 
         return $pending;
