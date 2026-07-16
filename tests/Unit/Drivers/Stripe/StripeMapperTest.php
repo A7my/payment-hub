@@ -534,4 +534,57 @@ final class StripeMapperTest extends TestCase
         $this->assertSame('sub_test_001', $response->getSubscriptionId());
         $this->assertSame($payload, $response->getRawResponse());
     }
+
+    // =========================================================================
+    // toPaymentLinkResponse()
+    // =========================================================================
+
+    /** @test */
+    public function test_checkout_session_maps_url_and_id(): void
+    {
+        $response = $this->mapper->toPaymentLinkResponse([
+            'id'     => 'cs_test_001',
+            'object' => 'checkout.session',
+            'status' => 'open',
+            'url'    => 'https://checkout.stripe.com/c/pay/cs_test_001',
+        ]);
+
+        $this->assertTrue($response->isSuccessful());
+        $this->assertSame('https://checkout.stripe.com/c/pay/cs_test_001', $response->getPaymentUrl());
+        $this->assertSame('cs_test_001', $response->getLinkId());
+        $this->assertSame('Payment link created.', $response->getMessage());
+    }
+
+    /** @test */
+    public function test_checkout_session_with_expires_at_populates_expiry(): void
+    {
+        $response = $this->mapper->toPaymentLinkResponse([
+            'id'         => 'cs_test_002',
+            'url'        => 'https://checkout.stripe.com/c/pay/cs_test_002',
+            'expires_at' => 1700003600,
+        ]);
+
+        $this->assertTrue($response->hasExpiry());
+        $this->assertSame(1700003600, $response->getExpiresAt()->getTimestamp());
+    }
+
+    /** @test */
+    public function test_checkout_session_without_expires_at_has_no_expiry(): void
+    {
+        $response = $this->mapper->toPaymentLinkResponse([
+            'id'  => 'cs_test_003',
+            'url' => 'https://checkout.stripe.com/c/pay/cs_test_003',
+        ]);
+
+        $this->assertFalse($response->hasExpiry());
+        $this->assertNull($response->getExpiresAt());
+    }
+
+    /** @test */
+    public function test_checkout_session_missing_url_reports_an_empty_payment_url(): void
+    {
+        $response = $this->mapper->toPaymentLinkResponse(['id' => 'cs_test_004']);
+
+        $this->assertSame('', $response->getPaymentUrl());
+    }
 }

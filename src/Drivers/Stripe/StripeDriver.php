@@ -24,6 +24,7 @@ use Mifatoyeh\LaravelPaymentFramework\Events\CardSaved;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentCaptured;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentFailed;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentInitiated;
+use Mifatoyeh\LaravelPaymentFramework\Events\PaymentLinkCreated;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentRefunded;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentSucceeded;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentVoided;
@@ -77,9 +78,9 @@ use Throwable;
  *
  * `charge()`, `authorize()`, `void()`, `capture()`, `refund()`,
  * `partialRefund()`, `verify()`, `lookup()`, `saveCard()`, `chargeToken()`,
- * `createSubscription()`, and `cancelSubscription()` are fully implemented.
- * Every other method body is intentionally left as a `// TODO` stub, to be
- * implemented in a later task.
+ * `createSubscription()`, `cancelSubscription()`, and `createPaymentLink()`
+ * are fully implemented. Every other method body is intentionally left as a
+ * `// TODO` stub, to be implemented in a later task.
  */
 final class StripeDriver extends AbstractDriver implements PaymentDriverContract
 {
@@ -520,21 +521,65 @@ final class StripeDriver extends AbstractDriver implements PaymentDriverContract
         }
     }
 
-    /** {@inheritDoc} */
+    /**
+     * {@inheritDoc}
+     *
+     * Backed by a Stripe Checkout Session, not Stripe's separate
+     * `PaymentLink` API resource — see
+     * {@see StripeMapper::toPaymentLinkResponse()}'s docblock for why.
+     *
+     * One framework-level guard runs before any Stripe call:
+     * `$request->returnUrl` is required — verified against the SDK that
+     * Stripe's hosted Checkout flow (the only flow this driver uses; no
+     * `ui_mode`/`redirect_on_completion` override is set) requires a
+     * `success_url`. `$request->cancelUrl` is NOT guarded — verified
+     * genuinely optional (Stripe just omits the "back" button on the hosted
+     * page when absent).
+     *
+     * No {@see CardException} soft-failure branch — verified against the
+     * SDK that creating a Checkout Session never itself charges a card; the
+     * actual charge happens later, asynchronously, when the customer
+     * completes checkout on Stripe's hosted page (observable via a
+     * `checkout.session.completed` webhook — out of scope for this method,
+     * see {@see self::processWebhook()}). `PaymentLinkCreated` is
+     * dispatched unconditionally after any non-throwing result, matching
+     * {@see StripeMapper::toPaymentLinkResponse()}'s `successful:
+     * true`-unconditionally contract.
+     */
     public function createPaymentLink(PaymentLinkRequest $request): PaymentLinkResponse
     {
-        // TODO: $this->validateIdempotencyKey($request->idempotencyKey);
-        // TODO: $this->logInfo('Creating payment link', $this->buildLogContext('createPaymentLink'));
-        // TODO: try {
-        //           $raw      = $this->withRetry(fn () => /* $this->client checkout session call */ null);
-        //           $response = $this->mapper->toPaymentLinkResponse($raw);
-        //           $this->dispatchEvent(new PaymentLinkCreated($request, $response));
-        //           return $response;
-        //       } catch (\Throwable $e) {
-        //           $this->logError('Payment link creation failed', $this->buildLogContext('createPaymentLink'));
-        //           throw $this->exceptionMapper->map($e, ['operation' => 'createPaymentLink']);
-        //       }
-        throw new \LogicException('StripeDriver::createPaymentLink() not yet implemented.');
+        $this->validateIdempotencyKey($request->idempotencyKey);
+
+        if ($request->returnUrl === null || trim($request->returnUrl) === '') {
+            throw new InvalidArgumentException(
+                'PaymentLinkRequest::$returnUrl is required to create a Stripe Checkout Session: ' .
+                'Stripe requires a success_url for the hosted checkout redirect flow this driver uses. ' .
+                'Pass the URL customers should land on after completing payment.',
+            );
+        }
+
+        $this->logInfo('Creating payment link', $this->buildLogContext('createPaymentLink', [
+            'amount'   => $request->amount->amount,
+            'currency' => $request->currency->value,
+        ]));
+
+        try {
+            $raw      = $this->withRetry(fn () => $this->client->createCheckoutSession($request));
+            $response = $this->mapper->toPaymentLinkResponse($raw);
+
+            $this->dispatchEvent(new PaymentLinkCreated($request, $response));
+            $this->logInfo('Payment link created', $this->buildLogContext('createPaymentLink', [
+                'link_id' => $response->getLinkId(),
+            ]));
+
+            return $response;
+        } catch (Throwable $e) {
+            $this->logError('Payment link creation failed', $this->buildLogContext('createPaymentLink', [
+                'error' => $e->getMessage(),
+            ]));
+
+            throw $this->exceptionMapper->map($e, ['operation' => 'createPaymentLink']);
+        }
     }
 
     /**

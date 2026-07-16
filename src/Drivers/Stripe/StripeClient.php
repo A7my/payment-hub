@@ -6,6 +6,7 @@ namespace Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe;
 
 use Mifatoyeh\LaravelPaymentFramework\DTO\CancelSubscriptionRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CaptureRequest;
+use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentLinkRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\RefundRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\SaveCardRequest;
@@ -651,6 +652,76 @@ final class StripeClient
         );
 
         return $subscription->toArray();
+    }
+
+    /**
+     * Create a Stripe Checkout Session (hosted payment page), for
+     * {@see StripeDriver::createPaymentLink()}.
+     *
+     * Verified against the SDK: unlike
+     * {@see self::createSubscription()}'s `items[].price_data`, a Checkout
+     * Session's `line_items[].price_data` supports a genuinely inline
+     * `product_data.name` — NO pre-existing Stripe Product or Price id is
+     * required. `$request->description` is forwarded there, so this method
+     * needs no framework-level "must reference an existing catalog object"
+     * guard the way `createSubscription()` does for `$request->planId`.
+     *
+     * `mode: 'payment'` is always set — this DTO has no recurring/interval
+     * concept (that's {@see SubscriptionRequest}'s job), so every payment
+     * link this method creates is a one-time payment.
+     *
+     * `success_url` (`$request->returnUrl`) is required by Stripe for the
+     * default hosted redirect flow this driver uses (no `ui_mode`/
+     * `redirect_on_completion` override is set) — this client method itself
+     * performs no validation (thin wrapper, no business logic); see
+     * {@see StripeDriver::createPaymentLink()} for the framework-level
+     * guard. `cancel_url` (`$request->cancelUrl`) is NOT guarded — verified
+     * against the SDK that it is genuinely optional (Stripe simply omits
+     * the "back" button on the hosted page when absent).
+     *
+     * `customer_email` is forwarded from `$request->customer?->email` when
+     * present, to prefill the hosted page — this does NOT create or attach
+     * a Stripe Customer object (no `customer` param is set); `PaymentLinkRequest`
+     * has no provider-customer-reference concept, unlike
+     * {@see TokenChargeRequest}/{@see SubscriptionRequest}.
+     *
+     * Performs no interpretation of the result or of any exception raised —
+     * both are simply propagated to the caller.
+     *
+     * @param PaymentLinkRequest $request The payment link creation request.
+     *
+     * @return array<string, mixed> The raw, decoded Stripe Checkout Session payload.
+     *
+     * @throws \Stripe\Exception\ApiErrorException On any Stripe API error.
+     */
+    public function createCheckoutSession(PaymentLinkRequest $request): array
+    {
+        $session = $this->sdk()->checkout->sessions->create(
+            array_filter(
+                [
+                    'mode'           => 'payment',
+                    'success_url'    => $request->returnUrl,
+                    'cancel_url'     => $request->cancelUrl,
+                    'customer_email' => $request->customer?->email,
+                    'expires_at'     => $request->expiresAt?->getTimestamp(),
+                    'metadata'       => $request->metadata,
+                    'line_items'     => [
+                        [
+                            'quantity'   => 1,
+                            'price_data' => [
+                                'currency'     => strtolower($request->currency->value),
+                                'unit_amount'  => $request->amount->amount,
+                                'product_data' => ['name' => $request->description],
+                            ],
+                        ],
+                    ],
+                ],
+                static fn (mixed $value): bool => $value !== null && $value !== [],
+            ),
+            ['idempotency_key' => $request->idempotencyKey],
+        );
+
+        return $session->toArray();
     }
 
     /**

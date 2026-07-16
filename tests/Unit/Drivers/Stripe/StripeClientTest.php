@@ -7,6 +7,7 @@ namespace Mifatoyeh\LaravelPaymentFramework\Tests\Unit\Drivers\Stripe;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CancelSubscriptionRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CaptureRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CustomerData;
+use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentLinkRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\RefundRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\SaveCardRequest;
@@ -148,6 +149,22 @@ final class StripeClientTest extends TestCase
         );
     }
 
+    private function makePaymentLinkRequest(
+        ?string $returnUrl = 'https://example.com/success',
+        ?string $cancelUrl = 'https://example.com/cancel',
+    ): PaymentLinkRequest {
+        return new PaymentLinkRequest(
+            amount: Money::ofMinor(10000, Currency::USD),
+            currency: Currency::USD,
+            description: 'Sandbox test payment',
+            customer: new CustomerData('Mohamed Azmy', 'azmy@example.com'),
+            returnUrl: $returnUrl,
+            cancelUrl: $cancelUrl,
+            expiresAt: null,
+            idempotencyKey: 'idem-client-paylink-001',
+        );
+    }
+
     /**
      * @return array{0: string, 1: int, 2: array<int, string>}
      */
@@ -244,6 +261,23 @@ final class StripeClientTest extends TestCase
                 'object'               => 'subscription',
                 'status'               => 'canceled',
                 'cancel_at_period_end' => false,
+            ], JSON_THROW_ON_ERROR),
+            200,
+            [],
+        ];
+    }
+
+    /**
+     * @return array{0: string, 1: int, 2: array<int, string>}
+     */
+    private function checkoutSessionResponse(): array
+    {
+        return [
+            json_encode([
+                'id'     => 'cs_test_client_001',
+                'object' => 'checkout.session',
+                'status' => 'open',
+                'url'    => 'https://checkout.stripe.com/c/pay/cs_test_client_001',
             ], JSON_THROW_ON_ERROR),
             200,
             [],
@@ -1093,6 +1127,85 @@ final class StripeClientTest extends TestCase
         );
 
         $this->assertSame('sub_test_client_001', $raw['id']);
+    }
+
+    // =========================================================================
+    // createCheckoutSession()
+    // =========================================================================
+
+    /** @test */
+    public function test_create_checkout_session_forwards_success_and_cancel_urls(): void
+    {
+        $client = new CapturingHttpClient($this->checkoutSessionResponse());
+        ApiRequestor::setHttpClient($client);
+
+        (new StripeClient(['secret' => 'sk_test_dummy']))->createCheckoutSession($this->makePaymentLinkRequest());
+
+        $this->assertSame('https://example.com/success', $client->paramsSent[0]['success_url']);
+        $this->assertSame('https://example.com/cancel', $client->paramsSent[0]['cancel_url']);
+    }
+
+    /** @test */
+    public function test_create_checkout_session_omits_cancel_url_when_absent(): void
+    {
+        $client = new CapturingHttpClient($this->checkoutSessionResponse());
+        ApiRequestor::setHttpClient($client);
+
+        (new StripeClient(['secret' => 'sk_test_dummy']))->createCheckoutSession(
+            $this->makePaymentLinkRequest(cancelUrl: null),
+        );
+
+        $this->assertArrayNotHasKey('cancel_url', $client->paramsSent[0]);
+    }
+
+    /** @test */
+    public function test_create_checkout_session_always_uses_payment_mode(): void
+    {
+        $client = new CapturingHttpClient($this->checkoutSessionResponse());
+        ApiRequestor::setHttpClient($client);
+
+        (new StripeClient(['secret' => 'sk_test_dummy']))->createCheckoutSession($this->makePaymentLinkRequest());
+
+        $this->assertSame('payment', $client->paramsSent[0]['mode']);
+    }
+
+    /** @test */
+    public function test_create_checkout_session_builds_an_inline_line_item_with_no_pre_existing_price_or_product(): void
+    {
+        $client = new CapturingHttpClient($this->checkoutSessionResponse());
+        ApiRequestor::setHttpClient($client);
+
+        (new StripeClient(['secret' => 'sk_test_dummy']))->createCheckoutSession($this->makePaymentLinkRequest());
+
+        $lineItem = $client->paramsSent[0]['line_items'][0];
+        $this->assertSame(10000, $lineItem['price_data']['unit_amount']);
+        $this->assertSame('usd', $lineItem['price_data']['currency']);
+        $this->assertSame('Sandbox test payment', $lineItem['price_data']['product_data']['name']);
+        $this->assertArrayNotHasKey('price', $lineItem);
+    }
+
+    /** @test */
+    public function test_create_checkout_session_forwards_customer_email_without_creating_a_customer(): void
+    {
+        $client = new CapturingHttpClient($this->checkoutSessionResponse());
+        ApiRequestor::setHttpClient($client);
+
+        (new StripeClient(['secret' => 'sk_test_dummy']))->createCheckoutSession($this->makePaymentLinkRequest());
+
+        $this->assertSame('azmy@example.com', $client->paramsSent[0]['customer_email']);
+        $this->assertArrayNotHasKey('customer', $client->paramsSent[0]);
+    }
+
+    /** @test */
+    public function test_create_checkout_session_returns_the_raw_decoded_payload(): void
+    {
+        $client = new CapturingHttpClient($this->checkoutSessionResponse());
+        ApiRequestor::setHttpClient($client);
+
+        $raw = (new StripeClient(['secret' => 'sk_test_dummy']))->createCheckoutSession($this->makePaymentLinkRequest());
+
+        $this->assertSame('cs_test_client_001', $raw['id']);
+        $this->assertSame('https://checkout.stripe.com/c/pay/cs_test_client_001', $raw['url']);
     }
 }
 

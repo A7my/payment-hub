@@ -720,14 +720,39 @@ final class StripeMapper
     }
 
     /**
-     * Map a raw Stripe Checkout Session / Payment Link payload to a PaymentLinkResponse.
+     * Map a raw Stripe Checkout Session payload to a PaymentLinkResponse.
      *
-     * @param array<string, mixed> $raw The raw Stripe API response payload.
+     * Used by createPaymentLink() — backed by a Stripe Checkout Session
+     * (verified against the SDK; see {@see StripeClient::createCheckoutSession()}'s
+     * own docblock for why a Checkout Session was chosen over Stripe's
+     * separate `PaymentLink` API resource: `PaymentLink` has no `cancel_url`
+     * concept at all, since it is a reusable/static link, whereas
+     * `PaymentLinkRequest::$cancelUrl` is a real field this framework
+     * exposes — Checkout Session supports it directly).
+     *
+     * `successful` is unconditionally `true` — same reasoning as
+     * {@see self::toStatusResponse()}/{@see self::toVerificationResponse()}:
+     * only reached after a non-throwing create call, and creating a
+     * Checkout Session never itself charges a card (that happens later,
+     * asynchronously, when the customer completes checkout on Stripe's
+     * hosted page) — there is no soft-decline outcome to represent here.
+     *
+     * @param array<string, mixed> $raw The raw Stripe Checkout Session API response payload.
      */
     public function toPaymentLinkResponse(array $raw): PaymentLinkResponse
     {
-        // TODO: Construct PaymentLinkResponse from the Stripe Checkout Session payload.
-        throw new \LogicException('StripeMapper::toPaymentLinkResponse() not yet implemented.');
+        $expiresAt = isset($raw['expires_at']) && is_int($raw['expires_at'])
+            ? (new DateTimeImmutable())->setTimestamp($raw['expires_at'])
+            : null;
+
+        return new PaymentLinkResponse(
+            successful: true,
+            paymentUrl: (string) ($raw['url'] ?? ''),
+            linkId: (string) ($raw['id'] ?? ''),
+            expiresAt: $expiresAt,
+            message: 'Payment link created.',
+            rawResponse: $raw,
+        );
     }
 
     /**
