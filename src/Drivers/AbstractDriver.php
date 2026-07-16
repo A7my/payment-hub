@@ -10,6 +10,7 @@ use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\PaymentDriverContract;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\SupportsCapabilities;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Logging\PaymentLoggerContract;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Services\RetryServiceContract;
+use Mifatoyeh\LaravelPaymentFramework\DTO\CancelSubscriptionRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CaptureRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentLinkRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentRequest;
@@ -33,7 +34,6 @@ use Mifatoyeh\LaravelPaymentFramework\Responses\SubscriptionResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\VerificationResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\VoidResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\WebhookResponse;
-use Mifatoyeh\LaravelPaymentFramework\ValueObjects\TransactionId;
 
 /**
  * Abstract base class for all payment provider drivers.
@@ -185,7 +185,7 @@ abstract class AbstractDriver implements PaymentDriverContract
     abstract public function createSubscription(SubscriptionRequest $request): SubscriptionResponse;
 
     /** {@inheritDoc} */
-    abstract public function cancelSubscription(TransactionId $subscriptionId): SubscriptionResponse;
+    abstract public function cancelSubscription(CancelSubscriptionRequest $request): SubscriptionResponse;
 
     /** {@inheritDoc} */
     abstract public function processWebhook(WebhookRequest $request): WebhookResponse;

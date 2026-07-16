@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Mifatoyeh\LaravelPaymentFramework\Services;
 
+use Mifatoyeh\LaravelPaymentFramework\DTO\CancelSubscriptionRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CaptureRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentLinkRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentRequest;
@@ -22,7 +23,6 @@ use Mifatoyeh\LaravelPaymentFramework\Responses\StatusResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\SubscriptionResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\VerificationResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\VoidResponse;
-use Mifatoyeh\LaravelPaymentFramework\ValueObjects\TransactionId;
 
 /**
  * High-level payment orchestration service.
@@ -164,13 +164,13 @@ final class PaymentService
     /**
      * Cancel an active subscription.
      *
-     * @param TransactionId $subscriptionId The provider's subscription identifier.
+     * @param CancelSubscriptionRequest $request The cancellation request DTO.
      *
      * @return SubscriptionResponse Standardised subscription response.
      */
-    public function cancelSubscription(TransactionId $subscriptionId): SubscriptionResponse
+    public function cancelSubscription(CancelSubscriptionRequest $request): SubscriptionResponse
     {
-        // TODO: return $this->manager->driver()->cancelSubscription($subscriptionId);
+        // TODO: return $this->manager->driver()->cancelSubscription($request);
         throw new \LogicException('PaymentService::cancelSubscription() not yet implemented.');
     }
 

@@ -8,6 +8,7 @@ use DateTimeImmutable;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
 use Mifatoyeh\LaravelPaymentFramework\DTO\AddressData;
+use Mifatoyeh\LaravelPaymentFramework\DTO\CancelSubscriptionRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CaptureRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CustomerData;
 use Mifatoyeh\LaravelPaymentFramework\DTO\OrderData;
@@ -270,6 +271,13 @@ final class PaymentRequestFactory
             currency: $currency,
             idempotencyKey: $this->idempotencyKey($data),
             customer: $this->customer($data['customer']),
+            // Previously missing here: array-input callers had no way to
+            // supply this at all (the DTO field existed, this builder just
+            // never read it) — fixed while touching this method again for
+            // the subscription work below, which needs the same field.
+            providerCustomerReference: isset($data['provider_customer_reference'])
+                ? (string) $data['provider_customer_reference']
+                : null,
             metadata: (array) ($data['metadata'] ?? []),
         );
     }
@@ -298,20 +306,35 @@ final class PaymentRequestFactory
             customer: $this->customer($data['customer']),
             planId: isset($data['plan_id']) ? (string) $data['plan_id'] : null,
             idempotencyKey: $this->idempotencyKey($data),
+            token: isset($data['token']) ? Token::fromString((string) $data['token']) : null,
+            providerCustomerReference: isset($data['provider_customer_reference'])
+                ? (string) $data['provider_customer_reference']
+                : null,
             metadata: (array) ($data['metadata'] ?? []),
         );
     }
 
     /**
-     * Resolve a subscription id argument that may be a TransactionId or a plain string.
+     * Build (or pass through) a CancelSubscriptionRequest for cancelSubscription().
      *
-     * @param TransactionId|string $subscriptionId
+     * @param CancelSubscriptionRequest|array<string, mixed> $data
      */
-    public function toTransactionId(TransactionId|string $subscriptionId): TransactionId
+    public function toCancelSubscriptionRequest(CancelSubscriptionRequest|array $data): CancelSubscriptionRequest
     {
-        return $subscriptionId instanceof TransactionId
-            ? $subscriptionId
-            : TransactionId::fromString($subscriptionId);
+        if ($data instanceof CancelSubscriptionRequest) {
+            return $data;
+        }
+
+        $this->requireKeys($data, ['subscription_id'], 'cancel subscription');
+
+        return new CancelSubscriptionRequest(
+            subscriptionId: TransactionId::fromString((string) $data['subscription_id']),
+            idempotencyKey: $this->idempotencyKey($data),
+            cancelAtPeriodEnd: (bool) ($data['cancel_at_period_end'] ?? false),
+            invoiceNow: (bool) ($data['invoice_now'] ?? false),
+            prorate: (bool) ($data['prorate'] ?? true),
+            reason: isset($data['reason']) ? (string) $data['reason'] : null,
+        );
     }
 
     // =========================================================================

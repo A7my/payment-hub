@@ -8,6 +8,7 @@ use Illuminate\Contracts\Events\Dispatcher;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\PaymentDriverContract;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Logging\PaymentLoggerContract;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Services\RetryServiceContract;
+use Mifatoyeh\LaravelPaymentFramework\DTO\CancelSubscriptionRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CaptureRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentLinkRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentRequest;
@@ -19,12 +20,16 @@ use Mifatoyeh\LaravelPaymentFramework\DTO\TransactionLookupRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\VoidRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\WebhookRequest;
 use Mifatoyeh\LaravelPaymentFramework\Drivers\AbstractDriver;
+use Mifatoyeh\LaravelPaymentFramework\Events\CardSaved;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentCaptured;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentFailed;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentInitiated;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentRefunded;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentSucceeded;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentVoided;
+use Mifatoyeh\LaravelPaymentFramework\Events\SubscriptionCancelled;
+use Mifatoyeh\LaravelPaymentFramework\Events\SubscriptionCreated;
+use Mifatoyeh\LaravelPaymentFramework\Events\TokenCharged;
 use Mifatoyeh\LaravelPaymentFramework\Events\TransactionLookuped;
 use Mifatoyeh\LaravelPaymentFramework\Responses\CaptureResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\PaymentLinkResponse;
@@ -35,7 +40,7 @@ use Mifatoyeh\LaravelPaymentFramework\Responses\SubscriptionResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\VerificationResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\VoidResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\WebhookResponse;
-use Mifatoyeh\LaravelPaymentFramework\ValueObjects\TransactionId;
+use InvalidArgumentException;
 use Stripe\Exception\CardException;
 use Throwable;
 
@@ -71,9 +76,10 @@ use Throwable;
  * same pattern.
  *
  * `charge()`, `authorize()`, `void()`, `capture()`, `refund()`,
- * `partialRefund()`, `verify()`, and `lookup()` are fully implemented.
- * Every other method body is intentionally left as a `// TODO` stub, to
- * be implemented in a later task.
+ * `partialRefund()`, `verify()`, `lookup()`, `saveCard()`, `chargeToken()`,
+ * `createSubscription()`, and `cancelSubscription()` are fully implemented.
+ * Every other method body is intentionally left as a `// TODO` stub, to be
+ * implemented in a later task.
  */
 final class StripeDriver extends AbstractDriver implements PaymentDriverContract
 {
@@ -531,71 +537,370 @@ final class StripeDriver extends AbstractDriver implements PaymentDriverContract
         throw new \LogicException('StripeDriver::createPaymentLink() not yet implemented.');
     }
 
-    /** {@inheritDoc} */
+    /**
+     * {@inheritDoc}
+     *
+     * Two sequential Stripe API calls, both wrapped individually in
+     * {@see self::withRetry()} — this two-step sequence (create a Customer,
+     * then a SetupIntent scoped to it) is orchestration, so it lives here,
+     * not inside a single {@see StripeClient} method (see that class's own
+     * docblock: "no business logic"):
+     *   1. {@see StripeClient::createCustomer()} — `SaveCardRequest` carries
+     *      no provider-side customer identity at all (design gap resolved:
+     *      see {@see SaveCardRequest}'s docblock and
+     *      {@see \Mifatoyeh\LaravelPaymentFramework\DTO\TokenChargeRequest::$providerCustomerReference}),
+     *      so one is created here, every call.
+     *   2. {@see StripeClient::createSetupIntent()} — attaches
+     *      `$request->token` to that new customer and confirms immediately.
+     *
+     * A declined card ({@see CardException}) IS a soft failure here, same
+     * as {@see self::charge()}/{@see self::authorize()} — verified against
+     * the SDK that SetupIntent confirmation genuinely touches a card
+     * network — per {@see PaymentResponse}'s own documented contract, which
+     * is not scoped to any one operation. The already-created Stripe
+     * Customer id is preserved in the returned response's
+     * `providerReference` even on a decline, via {@see self::declinedSetupIntentFrom()},
+     * so a caller can retry saveCard() for the same customer with a
+     * different card without losing that reference. No event is dispatched
+     * on a soft failure: {@see \Mifatoyeh\LaravelPaymentFramework\Events\PaymentFailed}
+     * is hard-typed to `PaymentRequest` (verified — it does not accept a
+     * `SaveCardRequest`) and no `CardSaveFailed`-style event exists to
+     * dispatch instead; inventing one wasn't asked for and nothing consumes
+     * it, matching the same reasoning used for verify()/void() not having a
+     * failure-event counterpart.
+     *
+     * No `CardSaved`-equivalent "started" event is dispatched before the
+     * call either — the Events directory has no such event, and this
+     * mirrors {@see self::capture()}/{@see self::void()}/{@see self::refund()},
+     * none of which dispatch a "started" event; only {@see self::charge()}/
+     * {@see self::authorize()} do, via {@see PaymentInitiated}, which is
+     * itself hard-typed to `PaymentRequest`.
+     */
     public function saveCard(SaveCardRequest $request): PaymentResponse
     {
-        // TODO: $this->validateIdempotencyKey($request->idempotencyKey);
-        // TODO: $this->logInfo('Saving card', $this->buildLogContext('saveCard'));
-        // TODO: try {
-        //           $raw      = $this->withRetry(fn () => /* $this->client setup intent / payment method attach call */ null);
-        //           $response = $this->mapper->toPaymentResponse($raw);
-        //           $this->dispatchEvent(new CardSaved($request, $response));
-        //           return $response;
-        //       } catch (\Throwable $e) {
-        //           $this->logError('Save card failed', $this->buildLogContext('saveCard'));
-        //           throw $this->exceptionMapper->map($e, ['operation' => 'saveCard']);
-        //       }
-        throw new \LogicException('StripeDriver::saveCard() not yet implemented.');
+        $this->validateIdempotencyKey($request->idempotencyKey);
+        $this->logInfo('Saving card', $this->buildLogContext('saveCard', [
+            'customer_id' => $request->customerId->toString(),
+        ]));
+
+        $stripeCustomerId = '';
+
+        try {
+            $customer         = $this->withRetry(fn () => $this->client->createCustomer($request));
+            $stripeCustomerId = (string) ($customer['id'] ?? '');
+
+            $raw      = $this->withRetry(fn () => $this->client->createSetupIntent($stripeCustomerId, $request));
+            $response = $this->mapper->toSaveCardResponse($raw);
+
+            if ($response->isSuccessful()) {
+                $this->dispatchEvent(new CardSaved($request, $response));
+                $this->logInfo('Card saved', $this->buildLogContext('saveCard', [
+                    'transaction_id'     => $response->getTransactionId()->toString(),
+                    'provider_reference' => $response->getProviderReference(),
+                ]));
+            } else {
+                $this->logWarning('Card save did not succeed', $this->buildLogContext('saveCard', [
+                    'status'  => $response->getStatus()->value,
+                    'message' => $response->getMessage(),
+                ]));
+            }
+
+            return $response;
+        } catch (CardException $e) {
+            $response = $this->mapper->toSaveCardResponse(
+                $this->declinedSetupIntentFrom($e, $request, $stripeCustomerId),
+            );
+            $this->logWarning('Card save declined by Stripe', $this->buildLogContext('saveCard', [
+                'decline_code' => $e->getDeclineCode(),
+                'message'      => $e->getMessage(),
+            ]));
+
+            return $response;
+        } catch (Throwable $e) {
+            $this->logError('Save card failed', $this->buildLogContext('saveCard', [
+                'error' => $e->getMessage(),
+            ]));
+
+            throw $this->exceptionMapper->map($e, ['operation' => 'saveCard']);
+        }
     }
 
-    /** {@inheritDoc} */
+    /**
+     * Build a raw SetupIntent-shaped array from a declined-card exception.
+     *
+     * Counterpart to {@see self::declinedPaymentIntentFrom()} for the
+     * SetupIntent shape {@see StripeMapper::toSaveCardResponse()} expects
+     * (`last_setup_error`, not `last_payment_error`; `customer`, not
+     * `amount`/`currency`). Stripe embeds the associated SetupIntent under
+     * `error.setup_intent` for confirmation-time card declines, mirroring
+     * `error.payment_intent` on a PaymentIntent decline; when absent, a
+     * minimal synthetic payload is built instead — crucially still carrying
+     * `$stripeCustomerId`, so the caller does not lose the already-created
+     * Customer reference just because the card itself was declined.
+     *
+     * @param CardException    $e                 The card decline exception.
+     * @param SaveCardRequest  $request           The original request (used only for the fallback payload's id).
+     * @param string           $stripeCustomerId  The Stripe Customer id already created before the decline.
+     *
+     * @return array<string, mixed>
+     */
+    private function declinedSetupIntentFrom(CardException $e, SaveCardRequest $request, string $stripeCustomerId): array
+    {
+        $setupIntent = $e->getJsonBody()['error']['setup_intent'] ?? null;
+
+        if (is_array($setupIntent)) {
+            return $setupIntent;
+        }
+
+        return [
+            'id'               => 'declined_' . $request->idempotencyKey,
+            'status'           => 'requires_payment_method',
+            'customer'         => $stripeCustomerId,
+            'last_setup_error' => ['message' => $e->getMessage()],
+        ];
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * Requires `$request->providerCustomerReference` — enforced here with an
+     * explicit, framework-level {@see InvalidArgumentException} BEFORE any
+     * Stripe call is attempted, rather than letting a bare/omitted value
+     * surface as a cryptic Stripe API rejection. Same philosophy as the
+     * `payment_method`/`token` collision guard in
+     * {@see \Mifatoyeh\LaravelPaymentFramework\Factories\PaymentRequestFactory::paymentMethod()}:
+     * a caller mistake should fail fast with a message that names the exact
+     * fix, not a generic provider error several layers removed from the
+     * actual cause. This is a genuinely hard Stripe requirement, not a
+     * framework-imposed one — verified against the SDK
+     * (`PaymentIntent::$customer`'s own docblock).
+     *
+     * Otherwise identical orchestration to {@see self::charge()}: same
+     * {@see CardException} soft-failure handling (per
+     * {@see PaymentResponse}'s own documented contract), reusing
+     * {@see StripeMapper::toPaymentResponse()} unchanged — a token charge
+     * creates a real PaymentIntent, the same shape charge()/authorize()
+     * already produce. No `PaymentInitiated`-equivalent "started" event is
+     * dispatched (same reasoning as {@see self::saveCard()}); no event is
+     * dispatched on a soft failure either, for the same reason
+     * ({@see \Mifatoyeh\LaravelPaymentFramework\Events\PaymentFailed} is
+     * hard-typed to `PaymentRequest`, verified, and no
+     * `TokenChargeFailed`-style event exists).
+     */
     public function chargeToken(TokenChargeRequest $request): PaymentResponse
     {
-        // TODO: $this->validateIdempotencyKey($request->idempotencyKey);
-        // TODO: $this->logInfo('Charging saved token', $this->buildLogContext('chargeToken'));
-        // TODO: try {
-        //           $raw      = $this->withRetry(fn () => /* $this->client off-session PaymentIntent call */ null);
-        //           $response = $this->mapper->toPaymentResponse($raw);
-        //           $this->dispatchEvent(new TokenCharged($request, $response));
-        //           return $response;
-        //       } catch (\Throwable $e) {
-        //           $this->logError('Token charge failed', $this->buildLogContext('chargeToken'));
-        //           throw $this->exceptionMapper->map($e, ['operation' => 'chargeToken']);
-        //       }
-        throw new \LogicException('StripeDriver::chargeToken() not yet implemented.');
+        $this->validateIdempotencyKey($request->idempotencyKey);
+
+        if ($request->providerCustomerReference === null || trim($request->providerCustomerReference) === '') {
+            throw new InvalidArgumentException(
+                'TokenChargeRequest::$providerCustomerReference is required to charge a saved Stripe ' .
+                'payment method off-session: Stripe scopes a saved payment method to the Customer it was ' .
+                "attached to during saveCard() (verified against the SDK — PaymentIntent::\$customer: " .
+                '"Payment methods attached to other Customers cannot be used with this PaymentIntent"). ' .
+                "Pass the value returned via a prior saveCard() call's PaymentResponse::getProviderReference().",
+            );
+        }
+
+        $this->logInfo('Charging saved token', $this->buildLogContext('chargeToken', [
+            'amount'   => $request->amount->amount,
+            'currency' => $request->currency->value,
+        ]));
+
+        try {
+            $raw      = $this->withRetry(fn () => $this->client->createTokenCharge($request));
+            $response = $this->mapper->toPaymentResponse($raw);
+
+            if ($response->isSuccessful()) {
+                $this->dispatchEvent(new TokenCharged($request, $response));
+                $this->logInfo('Token charge succeeded', $this->buildLogContext('chargeToken', [
+                    'transaction_id' => $response->getTransactionId()->toString(),
+                    'status'         => $response->getStatus()->value,
+                ]));
+            } else {
+                $this->logWarning('Token charge did not succeed', $this->buildLogContext('chargeToken', [
+                    'status'  => $response->getStatus()->value,
+                    'message' => $response->getMessage(),
+                ]));
+            }
+
+            return $response;
+        } catch (CardException $e) {
+            $response = $this->mapper->toPaymentResponse($this->declinedTokenChargeFrom($e, $request));
+            $this->logWarning('Token charge declined by Stripe', $this->buildLogContext('chargeToken', [
+                'decline_code' => $e->getDeclineCode(),
+                'message'      => $e->getMessage(),
+            ]));
+
+            return $response;
+        } catch (Throwable $e) {
+            $this->logError('Token charge failed', $this->buildLogContext('chargeToken', [
+                'error' => $e->getMessage(),
+            ]));
+
+            throw $this->exceptionMapper->map($e, ['operation' => 'chargeToken']);
+        }
     }
 
-    /** {@inheritDoc} */
+    /**
+     * Build a raw PaymentIntent-shaped array from a declined-card exception.
+     *
+     * Counterpart to {@see self::declinedPaymentIntentFrom()} typed for
+     * {@see TokenChargeRequest} instead of {@see PaymentRequest} — kept as
+     * its own separate method rather than a shared/generic helper, matching
+     * this package's established convention of not sharing driver-method
+     * bodies across different DTO types (e.g. refund()/partialRefund()).
+     *
+     * @param CardException      $e       The card decline exception.
+     * @param TokenChargeRequest $request The original request (used only for the fallback payload).
+     *
+     * @return array<string, mixed>
+     */
+    private function declinedTokenChargeFrom(CardException $e, TokenChargeRequest $request): array
+    {
+        $intent = $e->getJsonBody()['error']['payment_intent'] ?? null;
+
+        if (is_array($intent)) {
+            return $intent;
+        }
+
+        return [
+            'id'                 => 'declined_' . $request->idempotencyKey,
+            'status'             => 'requires_payment_method',
+            'amount'             => $request->amount->amount,
+            'currency'           => strtolower($request->currency->value),
+            'last_payment_error' => ['message' => $e->getMessage()],
+        ];
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * Two framework-level guards run BEFORE any Stripe call, both throwing
+     * {@see InvalidArgumentException} with a message naming the requirement
+     * and how to satisfy it — same philosophy as
+     * {@see self::chargeToken()}'s `providerCustomerReference` guard:
+     *   1. `$request->providerCustomerReference` is required — verified
+     *      against the SDK that Stripe Subscriptions are unconditionally
+     *      customer-scoped (`Subscription::$customer`).
+     *   2. `$request->planId` is required — this driver does not support
+     *      ad-hoc/inline pricing (verified against the SDK: even Stripe's
+     *      inline `price_data` path still requires an existing Product id,
+     *      so there is no genuinely ad-hoc path to fall back to; see
+     *      {@see StripeClient::createSubscription()}'s docblock).
+     *
+     * `$request->token` is NOT guarded — verified against the SDK that it
+     * is genuinely optional (Stripe falls back to the customer's own stored
+     * default payment method when omitted).
+     *
+     * No {@see CardException} soft-failure branch, unlike
+     * {@see self::charge()}/{@see self::chargeToken()} — verified against
+     * the SDK that creating a subscription does not throw synchronously on
+     * a first-charge decline; that outcome surfaces as
+     * `Subscription::$status === 'incomplete'` in the response payload
+     * instead, handled entirely inside
+     * {@see StripeMapper::toSubscriptionResponse()}. `SubscriptionCreated`
+     * is dispatched only when the mapped response is successful — mirroring
+     * {@see self::saveCard()}'s pattern, since an unsuccessful-but-non-
+     * throwing outcome (e.g. `incomplete`) is not a "created" event in any
+     * meaningful sense.
+     */
     public function createSubscription(SubscriptionRequest $request): SubscriptionResponse
     {
-        // TODO: $this->validateIdempotencyKey($request->idempotencyKey);
-        // TODO: $this->logInfo('Creating subscription', $this->buildLogContext('createSubscription'));
-        // TODO: try {
-        //           $raw      = $this->withRetry(fn () => /* $this->client subscription create call */ null);
-        //           $response = $this->mapper->toSubscriptionResponse($raw);
-        //           $this->dispatchEvent(new SubscriptionCreated($request, $response));
-        //           return $response;
-        //       } catch (\Throwable $e) {
-        //           $this->logError('Subscription creation failed', $this->buildLogContext('createSubscription'));
-        //           throw $this->exceptionMapper->map($e, ['operation' => 'createSubscription']);
-        //       }
-        throw new \LogicException('StripeDriver::createSubscription() not yet implemented.');
+        $this->validateIdempotencyKey($request->idempotencyKey);
+
+        if ($request->providerCustomerReference === null || trim($request->providerCustomerReference) === '') {
+            throw new InvalidArgumentException(
+                'SubscriptionRequest::$providerCustomerReference is required to create a Stripe subscription: ' .
+                "Stripe Subscriptions are unconditionally customer-scoped (verified against the SDK — " .
+                'Subscription::$customer: "ID of the customer who owns the subscription"). ' .
+                "Pass the value returned via a prior saveCard() call's PaymentResponse::getProviderReference().",
+            );
+        }
+
+        if (! $request->hasPlanId()) {
+            throw new InvalidArgumentException(
+                'SubscriptionRequest::$planId is required: this driver does not support ad-hoc/inline pricing. ' .
+                'Verified against the SDK: even Stripe\'s inline price_data path still requires an existing ' .
+                'Stripe Product id, so there is no genuinely ad-hoc path available either way. Pass an ' .
+                "existing Stripe Price ID (e.g. 'price_1N...'), created beforehand via the Stripe dashboard or API.",
+            );
+        }
+
+        $this->logInfo('Creating subscription', $this->buildLogContext('createSubscription', [
+            'interval' => $request->interval,
+            'plan_id'  => $request->planId,
+        ]));
+
+        try {
+            $raw      = $this->withRetry(fn () => $this->client->createSubscription($request));
+            $response = $this->mapper->toSubscriptionResponse($raw);
+
+            if ($response->isSuccessful()) {
+                $this->dispatchEvent(new SubscriptionCreated($request, $response));
+                $this->logInfo('Subscription created', $this->buildLogContext('createSubscription', [
+                    'subscription_id' => $response->getSubscriptionId(),
+                    'status'          => $response->getStatus()->value,
+                ]));
+            } else {
+                $this->logWarning('Subscription creation did not succeed', $this->buildLogContext('createSubscription', [
+                    'status'  => $response->getStatus()->value,
+                    'message' => $response->getMessage(),
+                ]));
+            }
+
+            return $response;
+        } catch (Throwable $e) {
+            $this->logError('Subscription creation failed', $this->buildLogContext('createSubscription', [
+                'error' => $e->getMessage(),
+            ]));
+
+            throw $this->exceptionMapper->map($e, ['operation' => 'createSubscription']);
+        }
     }
 
-    /** {@inheritDoc} */
-    public function cancelSubscription(TransactionId $subscriptionId): SubscriptionResponse
+    /**
+     * {@inheritDoc}
+     *
+     * Dispatches to one of two genuinely different Stripe API calls
+     * depending on `$request->cancelAtPeriodEnd` (verified against the SDK
+     * — see {@see StripeClient::cancelSubscriptionImmediately()} and
+     * {@see StripeClient::scheduleSubscriptionCancellation()}'s own
+     * docblocks for why these are not variants of the same call). Same
+     * narrower shape as {@see self::void()}/{@see self::capture()}: no
+     * {@see CardException} branch (cancelling never touches a card
+     * network), and {@see SubscriptionCancelled} is dispatched
+     * unconditionally after any non-throwing result — this operation has no
+     * soft-failure concept.
+     */
+    public function cancelSubscription(CancelSubscriptionRequest $request): SubscriptionResponse
     {
-        // TODO: $this->logInfo('Cancelling subscription', $this->buildLogContext('cancelSubscription'));
-        // TODO: try {
-        //           $raw      = $this->withRetry(fn () => /* $this->client subscription cancel call */ null);
-        //           $response = $this->mapper->toSubscriptionResponse($raw);
-        //           $this->dispatchEvent(new SubscriptionCancelled($subscriptionId, $response));
-        //           return $response;
-        //       } catch (\Throwable $e) {
-        //           $this->logError('Subscription cancellation failed', $this->buildLogContext('cancelSubscription'));
-        //           throw $this->exceptionMapper->map($e, ['operation' => 'cancelSubscription']);
-        //       }
-        throw new \LogicException('StripeDriver::cancelSubscription() not yet implemented.');
+        $this->validateIdempotencyKey($request->idempotencyKey);
+        $this->logInfo('Cancelling subscription', $this->buildLogContext('cancelSubscription', [
+            'subscription_id'      => $request->subscriptionId->toString(),
+            'cancel_at_period_end' => $request->cancelAtPeriodEnd,
+        ]));
+
+        try {
+            $raw = $request->cancelAtPeriodEnd
+                ? $this->withRetry(fn () => $this->client->scheduleSubscriptionCancellation($request))
+                : $this->withRetry(fn () => $this->client->cancelSubscriptionImmediately($request));
+
+            $response = $this->mapper->toSubscriptionResponse($raw);
+
+            $this->dispatchEvent(new SubscriptionCancelled($request, $response));
+            $this->logInfo('Subscription cancellation processed', $this->buildLogContext('cancelSubscription', [
+                'subscription_id' => $response->getSubscriptionId(),
+                'status'          => $response->getStatus()->value,
+            ]));
+
+            return $response;
+        } catch (Throwable $e) {
+            $this->logError('Subscription cancellation failed', $this->buildLogContext('cancelSubscription', [
+                'error' => $e->getMessage(),
+            ]));
+
+            throw $this->exceptionMapper->map($e, ['operation' => 'cancelSubscription']);
+        }
     }
 
     /** {@inheritDoc} */

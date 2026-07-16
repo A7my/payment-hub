@@ -13,8 +13,22 @@ use Mifatoyeh\LaravelPaymentFramework\ValueObjects\Token;
  * Immutable DTO representing a request to save a customer's payment method.
  *
  * Passed to PaymentDriverContract::saveCard(). The provider tokenises the
- * payment method referenced by $token and associates it with $customerId for
- * future recurring charges via TokenChargeRequest.
+ * payment method referenced by $token for future recurring charges via
+ * TokenChargeRequest.
+ *
+ * $customerId is the HOST APPLICATION's own customer reference ONLY — see
+ * {@see \Mifatoyeh\LaravelPaymentFramework\ValueObjects\CustomerId}'s own
+ * docblock. It is opaque to the provider and is never assumed to be (or be
+ * convertible to) a provider-side customer identity. When a driver's
+ * provider requires its own customer object to scope a saved payment method
+ * for later off-session reuse (Stripe does — see
+ * {@see \Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe\StripeDriver::saveCard()}),
+ * that provider-side identity is returned via
+ * {@see \Mifatoyeh\LaravelPaymentFramework\Responses\PaymentResponse::getProviderReference()},
+ * not derived from or stored on $customerId. Callers who need to charge the
+ * saved card later via {@see PaymentDriverContract::chargeToken()} must
+ * capture that `providerReference` value themselves and round-trip it via
+ * {@see TokenChargeRequest::$providerCustomerReference}.
  *
  * The $token here is typically a one-time setup/nonce token issued by the
  * provider's client-side SDK after the customer enters their card details.
@@ -24,7 +38,8 @@ final readonly class SaveCardRequest implements JsonSerializable
 {
     /**
      * @param Token                $token          A one-time provider token representing the payment method to save.
-     * @param CustomerId           $customerId     The host application's customer identifier.
+     * @param CustomerId           $customerId     The host application's OWN customer identifier — opaque to the
+     *                                              provider, never the provider-side customer id (see class docblock).
      * @param string               $idempotencyKey Unique key for safe retries (non-empty).
      * @param array<string, mixed> $metadata       Arbitrary key-value metadata forwarded to the provider.
      *

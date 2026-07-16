@@ -208,4 +208,330 @@ final class StripeMapperTest extends TestCase
         $this->assertSame(PaymentStatus::Failed, $response->getStatus());
         $this->assertFalse($response->isSuccessful());
     }
+
+    // =========================================================================
+    // toSaveCardResponse() — SetupIntent shape, distinct from toPaymentResponse()
+    // =========================================================================
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function setupIntentPayload(string $status = 'succeeded', ?array $lastSetupError = null): array
+    {
+        return array_filter([
+            'id'               => 'seti_test_001',
+            'object'           => 'setup_intent',
+            'status'           => $status,
+            'customer'         => 'cus_test_001',
+            'payment_method'   => 'pm_card_visa',
+            'last_setup_error' => $lastSetupError,
+        ], static fn ($value) => $value !== null);
+    }
+
+    /** @test */
+    public function test_succeeded_setup_intent_maps_to_captured_with_zero_amount(): void
+    {
+        $response = $this->mapper->toSaveCardResponse($this->setupIntentPayload());
+
+        $this->assertTrue($response->isSuccessful());
+        $this->assertSame(PaymentStatus::Captured, $response->getStatus());
+        $this->assertSame('seti_test_001', $response->getTransactionId()->toString());
+        // No amount concept exists on a SetupIntent — always zero.
+        $this->assertSame(0, $response->getAmount()->amount);
+        $this->assertSame('Card saved.', $response->getMessage());
+    }
+
+    /** @test */
+    public function test_setup_intent_customer_field_becomes_the_provider_reference(): void
+    {
+        $response = $this->mapper->toSaveCardResponse($this->setupIntentPayload());
+
+        $this->assertSame('cus_test_001', $response->getProviderReference());
+    }
+
+    /** @test */
+    public function test_requires_action_setup_intent_maps_to_requires_action(): void
+    {
+        $response = $this->mapper->toSaveCardResponse($this->setupIntentPayload(status: 'requires_action'));
+
+        $this->assertFalse($response->isSuccessful());
+        $this->assertSame(PaymentStatus::RequiresAction, $response->getStatus());
+        $this->assertTrue($response->requiresAction());
+    }
+
+    /** @test */
+    public function test_declined_setup_intent_reads_message_from_last_setup_error_not_last_payment_error(): void
+    {
+        // The field is genuinely named differently on a SetupIntent —
+        // reusing resolvePaymentMessage() unchanged would silently look at
+        // the wrong key (last_payment_error) and miss this message entirely.
+        $response = $this->mapper->toSaveCardResponse($this->setupIntentPayload(
+            status: 'requires_payment_method',
+            lastSetupError: ['message' => 'Your card was declined.'],
+        ));
+
+        $this->assertFalse($response->isSuccessful());
+        $this->assertSame(PaymentStatus::Failed, $response->getStatus());
+        $this->assertSame('Your card was declined.', $response->getMessage());
+    }
+
+    /** @test */
+    public function test_failed_setup_intent_without_last_setup_error_falls_back_to_generic_message(): void
+    {
+        $response = $this->mapper->toSaveCardResponse($this->setupIntentPayload(status: 'requires_payment_method'));
+
+        $this->assertSame('Card save failed.', $response->getMessage());
+    }
+
+    /** @test */
+    public function test_setup_intent_missing_customer_field_reports_an_empty_provider_reference(): void
+    {
+        $payload = $this->setupIntentPayload();
+        unset($payload['customer']);
+
+        $response = $this->mapper->toSaveCardResponse($payload);
+
+        $this->assertSame('', $response->getProviderReference());
+    }
+
+    // =========================================================================
+    // toSubscriptionResponse() — the 8-value Stripe status table
+    // =========================================================================
+
+    /**
+     * @param array<string, mixed>|null $latestInvoice
+     *
+     * @return array<string, mixed>
+     */
+    private function subscriptionPayload(
+        string $status = 'active',
+        bool $cancelAtPeriodEnd = false,
+        ?array $latestInvoice = null,
+        ?int $currentPeriodEnd = 1700000000,
+    ): array {
+        return array_filter([
+            'id'                   => 'sub_test_001',
+            'object'               => 'subscription',
+            'status'               => $status,
+            'customer'             => 'cus_test_001',
+            'cancel_at_period_end' => $cancelAtPeriodEnd,
+            'latest_invoice'       => $latestInvoice,
+            'items'                => $currentPeriodEnd !== null
+                ? ['data' => [['current_period_end' => $currentPeriodEnd]]]
+                : null,
+        ], static fn ($value) => $value !== null);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function invoiceWithPaymentIntent(string $paymentIntentStatus, ?string $declineMessage = null): array
+    {
+        return [
+            'id'       => 'in_test_001',
+            'object'   => 'invoice',
+            'payments' => [
+                'data' => [
+                    [
+                        'payment' => [
+                            'type'           => 'payment_intent',
+                            'payment_intent' => array_filter([
+                                'id'                 => 'pi_test_001',
+                                'status'             => $paymentIntentStatus,
+                                'last_payment_error' => $declineMessage !== null
+                                    ? ['message' => $declineMessage]
+                                    : null,
+                            ], static fn ($value) => $value !== null),
+                        ],
+                    ],
+                ],
+            ],
+        ];
+    }
+
+    /** @test */
+    public function test_active_maps_to_captured_and_is_successful(): void
+    {
+        $response = $this->mapper->toSubscriptionResponse($this->subscriptionPayload('active'));
+
+        $this->assertTrue($response->isSuccessful());
+        $this->assertSame(PaymentStatus::Captured, $response->getStatus());
+        $this->assertSame('Subscription is active.', $response->getMessage());
+        $this->assertTrue($response->hasNextBillingDate());
+    }
+
+    /** @test */
+    public function test_trialing_maps_to_pending_and_is_successful(): void
+    {
+        $response = $this->mapper->toSubscriptionResponse($this->subscriptionPayload('trialing'));
+
+        $this->assertTrue($response->isSuccessful());
+        $this->assertSame(PaymentStatus::Pending, $response->getStatus());
+        $this->assertSame('Subscription created; trial period in progress.', $response->getMessage());
+    }
+
+    /** @test */
+    public function test_incomplete_with_requires_action_payment_intent_maps_to_requires_action(): void
+    {
+        $payload = $this->subscriptionPayload(
+            'incomplete',
+            latestInvoice: $this->invoiceWithPaymentIntent('requires_action'),
+        );
+
+        $response = $this->mapper->toSubscriptionResponse($payload);
+
+        $this->assertFalse($response->isSuccessful());
+        $this->assertSame(PaymentStatus::RequiresAction, $response->getStatus());
+    }
+
+    /** @test */
+    public function test_incomplete_with_declined_payment_intent_maps_to_failed_with_decline_message(): void
+    {
+        $payload = $this->subscriptionPayload(
+            'incomplete',
+            latestInvoice: $this->invoiceWithPaymentIntent('requires_payment_method', 'Your card was declined.'),
+        );
+
+        $response = $this->mapper->toSubscriptionResponse($payload);
+
+        $this->assertFalse($response->isSuccessful());
+        $this->assertSame(PaymentStatus::Failed, $response->getStatus());
+        $this->assertSame('Your card was declined.', $response->getMessage());
+    }
+
+    /** @test */
+    public function test_incomplete_without_resolvable_expand_defaults_to_requires_action(): void
+    {
+        $payload = $this->subscriptionPayload('incomplete', latestInvoice: null);
+
+        $response = $this->mapper->toSubscriptionResponse($payload);
+
+        $this->assertSame(PaymentStatus::RequiresAction, $response->getStatus());
+    }
+
+    /** @test */
+    public function test_incomplete_with_unexpanded_payment_intent_string_id_defaults_to_requires_action(): void
+    {
+        // payment_intent came back as a bare id string, not expanded.
+        $payload = $this->subscriptionPayload('incomplete', latestInvoice: [
+            'id'       => 'in_test_002',
+            'payments' => ['data' => [['payment' => ['type' => 'payment_intent', 'payment_intent' => 'pi_test_002']]]],
+        ]);
+
+        $response = $this->mapper->toSubscriptionResponse($payload);
+
+        $this->assertSame(PaymentStatus::RequiresAction, $response->getStatus());
+    }
+
+    /** @test */
+    public function test_incomplete_expired_maps_to_expired_and_is_unsuccessful(): void
+    {
+        $response = $this->mapper->toSubscriptionResponse($this->subscriptionPayload('incomplete_expired'));
+
+        $this->assertFalse($response->isSuccessful());
+        $this->assertSame(PaymentStatus::Expired, $response->getStatus());
+    }
+
+    /** @test */
+    public function test_past_due_maps_to_failed(): void
+    {
+        $response = $this->mapper->toSubscriptionResponse($this->subscriptionPayload('past_due'));
+
+        $this->assertFalse($response->isSuccessful());
+        $this->assertSame(PaymentStatus::Failed, $response->getStatus());
+    }
+
+    /** @test */
+    public function test_unpaid_maps_to_failed(): void
+    {
+        $response = $this->mapper->toSubscriptionResponse($this->subscriptionPayload('unpaid'));
+
+        $this->assertFalse($response->isSuccessful());
+        $this->assertSame(PaymentStatus::Failed, $response->getStatus());
+    }
+
+    /** @test */
+    public function test_paused_maps_to_requires_action(): void
+    {
+        $response = $this->mapper->toSubscriptionResponse($this->subscriptionPayload('paused'));
+
+        $this->assertFalse($response->isSuccessful());
+        $this->assertSame(PaymentStatus::RequiresAction, $response->getStatus());
+    }
+
+    /** @test */
+    public function test_canceled_maps_to_cancelled_and_is_successful(): void
+    {
+        $response = $this->mapper->toSubscriptionResponse($this->subscriptionPayload('canceled'));
+
+        $this->assertTrue($response->isSuccessful());
+        $this->assertSame(PaymentStatus::Cancelled, $response->getStatus());
+        $this->assertTrue($response->isCancelled());
+        $this->assertSame('Subscription cancelled.', $response->getMessage());
+    }
+
+    // =========================================================================
+    // cancel_at_period_end message clarification
+    // =========================================================================
+
+    /** @test */
+    public function test_cancel_at_period_end_true_with_active_status_clarifies_message_without_forcing_cancelled(): void
+    {
+        $payload = $this->subscriptionPayload('active', cancelAtPeriodEnd: true);
+
+        $response = $this->mapper->toSubscriptionResponse($payload);
+
+        $this->assertSame(PaymentStatus::Captured, $response->getStatus());
+        $this->assertFalse($response->isCancelled());
+        $this->assertStringContainsString(
+            'will be cancelled at the end of the current billing period',
+            $response->getMessage(),
+        );
+    }
+
+    /** @test */
+    public function test_cancel_at_period_end_true_with_already_canceled_status_uses_the_plain_cancelled_message(): void
+    {
+        $payload = $this->subscriptionPayload('canceled', cancelAtPeriodEnd: true);
+
+        $response = $this->mapper->toSubscriptionResponse($payload);
+
+        $this->assertSame('Subscription cancelled.', $response->getMessage());
+    }
+
+    // =========================================================================
+    // nextBillingDate — per-item current_period_end
+    // =========================================================================
+
+    /** @test */
+    public function test_missing_items_reports_no_next_billing_date(): void
+    {
+        $payload = $this->subscriptionPayload('active', currentPeriodEnd: null);
+
+        $response = $this->mapper->toSubscriptionResponse($payload);
+
+        $this->assertFalse($response->hasNextBillingDate());
+        $this->assertNull($response->getNextBillingDate());
+    }
+
+    /** @test */
+    public function test_present_items_current_period_end_becomes_the_next_billing_date(): void
+    {
+        $payload = $this->subscriptionPayload('active', currentPeriodEnd: 1700000000);
+
+        $response = $this->mapper->toSubscriptionResponse($payload);
+
+        $this->assertTrue($response->hasNextBillingDate());
+        $this->assertSame(1700000000, $response->getNextBillingDate()->getTimestamp());
+    }
+
+    /** @test */
+    public function test_subscription_id_and_raw_response_are_preserved(): void
+    {
+        $payload  = $this->subscriptionPayload('active');
+        $response = $this->mapper->toSubscriptionResponse($payload);
+
+        $this->assertSame('sub_test_001', $response->getSubscriptionId());
+        $this->assertSame($payload, $response->getRawResponse());
+    }
 }

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Mifatoyeh\LaravelPaymentFramework\Testing;
 
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\PaymentDriverContract;
+use Mifatoyeh\LaravelPaymentFramework\DTO\CancelSubscriptionRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CaptureRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentLinkRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentRequest;
@@ -242,15 +243,17 @@ final class FakePaymentDriver implements PaymentDriverContract
     }
 
     /** {@inheritDoc} */
-    public function cancelSubscription(TransactionId $subscriptionId): SubscriptionResponse
+    public function cancelSubscription(CancelSubscriptionRequest $request): SubscriptionResponse
     {
         // TODO: Return a fake cancellation SubscriptionResponse
         return new SubscriptionResponse(
             successful: true,
-            subscriptionId: $subscriptionId->toString(),
-            status: PaymentStatus::Cancelled,
+            subscriptionId: $request->subscriptionId->toString(),
+            status: $request->cancelAtPeriodEnd ? PaymentStatus::Captured : PaymentStatus::Cancelled,
             nextBillingDate: null,
-            message: 'Fake subscription cancelled',
+            message: $request->cancelAtPeriodEnd
+                ? 'Fake subscription scheduled for cancellation at period end'
+                : 'Fake subscription cancelled',
             rawResponse: [],
         );
     }

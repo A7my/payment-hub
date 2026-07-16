@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Mifatoyeh\LaravelPaymentFramework\Drivers;
 
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\PaymentDriverContract;
+use Mifatoyeh\LaravelPaymentFramework\DTO\CancelSubscriptionRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CaptureRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentLinkRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentRequest;
@@ -25,7 +26,6 @@ use Mifatoyeh\LaravelPaymentFramework\Responses\SubscriptionResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\VerificationResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\VoidResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\WebhookResponse;
-use Mifatoyeh\LaravelPaymentFramework\ValueObjects\TransactionId;
 
 /**
  * Transparent decorator that lets package consumers call driver methods with
@@ -125,9 +125,10 @@ final class PaymentDriverProxy implements PaymentDriverContract
         return $this->driver->createSubscription($this->factory->toSubscriptionRequest($request));
     }
 
-    public function cancelSubscription(TransactionId|string $subscriptionId): SubscriptionResponse
+    /** @param CancelSubscriptionRequest|array<string, mixed> $request */
+    public function cancelSubscription(CancelSubscriptionRequest|array $request): SubscriptionResponse
     {
-        return $this->driver->cancelSubscription($this->factory->toTransactionId($subscriptionId));
+        return $this->driver->cancelSubscription($this->factory->toCancelSubscriptionRequest($request));
     }
 
     /**

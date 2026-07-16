@@ -750,7 +750,7 @@ class ConcreteTestDriver extends AbstractDriver
         throw new \LogicException('Not implemented in test stub.');
     }
 
-    public function cancelSubscription(\Mifatoyeh\LaravelPaymentFramework\ValueObjects\TransactionId $subscriptionId): SubscriptionResponse
+    public function cancelSubscription(\Mifatoyeh\LaravelPaymentFramework\DTO\CancelSubscriptionRequest $request): SubscriptionResponse
     {
         throw new \LogicException('Not implemented in test stub.');
     }

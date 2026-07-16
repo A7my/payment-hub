@@ -4,9 +4,13 @@ declare(strict_types=1);
 
 namespace Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe;
 
+use Mifatoyeh\LaravelPaymentFramework\DTO\CancelSubscriptionRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CaptureRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\RefundRequest;
+use Mifatoyeh\LaravelPaymentFramework\DTO\SaveCardRequest;
+use Mifatoyeh\LaravelPaymentFramework\DTO\SubscriptionRequest;
+use Mifatoyeh\LaravelPaymentFramework\DTO\TokenChargeRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\TransactionLookupRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\VoidRequest;
 use Stripe\StripeClient as StripeSdkClient;
@@ -258,6 +262,161 @@ final class StripeClient
     }
 
     /**
+     * Create a Stripe Customer to scope a saved payment method to, for
+     * {@see StripeDriver::saveCard()}.
+     *
+     * `SaveCardRequest` carries no name/email/phone (verified — it only has
+     * `$token`, `$customerId`, `$idempotencyKey`, `$metadata`; `$customerId`
+     * is the host application's own opaque reference, per its own docblock,
+     * not identity data usable here), so this creates a Customer with no
+     * identifying fields — Stripe's `customers->create()` accepts an empty
+     * params array. `$request->customerId` is forwarded ONLY inside
+     * `metadata.host_customer_id`, purely for cross-referencing/traceability
+     * on the Stripe dashboard; it is never sent as `email`, `name`, or any
+     * field Stripe would treat as identity data.
+     *
+     * Uses `$request->idempotencyKey` suffixed with `:customer` — NOT the
+     * bare key — because {@see self::createSetupIntent()} (a second, distinct
+     * Stripe API call for the same `saveCard()` operation) also needs an
+     * idempotency key, and Stripe idempotency keys must uniquely identify
+     * one specific request; reusing the identical key string across two
+     * different endpoints is avoided entirely rather than relying on
+     * cross-endpoint dedup behaviour that isn't documented.
+     *
+     * Performs no interpretation of the result or of any exception raised —
+     * both are simply propagated to the caller.
+     *
+     * @param SaveCardRequest $request The save-card request (used here only for its idempotency key and metadata).
+     *
+     * @return array<string, mixed> The raw, decoded Stripe Customer payload.
+     *
+     * @throws \Stripe\Exception\ApiErrorException On any Stripe API error.
+     */
+    public function createCustomer(SaveCardRequest $request): array
+    {
+        $customer = $this->sdk()->customers->create(
+            [
+                'metadata' => array_merge(
+                    ['host_customer_id' => $request->customerId->toString()],
+                    $request->metadata,
+                ),
+            ],
+            ['idempotency_key' => $request->idempotencyKey . ':customer'],
+        );
+
+        return $customer->toArray();
+    }
+
+    /**
+     * Create and immediately confirm a Stripe SetupIntent, attaching
+     * `$request->token` (a PaymentMethod id) to `$stripeCustomerId` for
+     * future off-session reuse via {@see StripeDriver::chargeToken()}, for
+     * {@see StripeDriver::saveCard()}.
+     *
+     * Verified against the SDK (`PaymentMethodService::attach()`'s own
+     * docblock, `PaymentMethod::$customer`/`PaymentIntent::$customer`): a
+     * bare `payment_methods/{id}/attach` call is NOT Stripe's recommended
+     * path for enabling later off-session charges — a SetupIntent (or
+     * `setup_future_usage`) is. `usage: 'off_session'` records that intent
+     * explicitly. `payment_method_types: ['card']` is fixed rather than
+     * left to Stripe's automatic detection, so confirming synchronously
+     * here never picks a redirect-based method type that would require a
+     * `return_url` we have no use for (this driver has no customer-present
+     * redirect flow for saveCard()).
+     *
+     * Uses `$request->idempotencyKey` suffixed with `:setup_intent` — see
+     * {@see self::createCustomer()}'s docblock for why a suffix is used at
+     * all instead of the bare key.
+     *
+     * Verified against the SDK: SetupIntent confirmation genuinely touches
+     * a card network (the card is verified, sometimes via a zero/small
+     * authorisation) and CAN raise a {@see \Stripe\Exception\CardException}
+     * on decline — this is not a money-movement-free operation like
+     * {@see self::cancelPaymentIntent()} or {@see self::capturePaymentIntent()}.
+     *
+     * Performs no interpretation of the result or of any exception raised —
+     * both are simply propagated to the caller.
+     *
+     * @param string          $stripeCustomerId The Stripe Customer id (from {@see self::createCustomer()}) to scope this payment method to.
+     * @param SaveCardRequest $request           The save-card request identifying the token and metadata.
+     *
+     * @return array<string, mixed> The raw, decoded Stripe SetupIntent payload.
+     *
+     * @throws \Stripe\Exception\ApiErrorException On any Stripe API error, including {@see \Stripe\Exception\CardException} on decline.
+     */
+    public function createSetupIntent(string $stripeCustomerId, SaveCardRequest $request): array
+    {
+        $setupIntent = $this->sdk()->setupIntents->create(
+            array_filter(
+                [
+                    'customer'              => $stripeCustomerId,
+                    'payment_method'        => $request->token->toString(),
+                    'confirm'               => true,
+                    'usage'                 => 'off_session',
+                    'payment_method_types'  => ['card'],
+                    'metadata'              => $request->metadata,
+                ],
+                static fn (mixed $value): bool => $value !== null && $value !== [],
+            ),
+            ['idempotency_key' => $request->idempotencyKey . ':setup_intent'],
+        );
+
+        return $setupIntent->toArray();
+    }
+
+    /**
+     * Create and immediately confirm a Stripe PaymentIntent against a
+     * previously saved payment method, for {@see StripeDriver::chargeToken()}.
+     *
+     * `$request->providerCustomerReference` is forwarded as Stripe's
+     * `customer` parameter — REQUIRED, not optional, whenever it is
+     * present: verified against the SDK
+     * (`PaymentIntent::$customer`'s own docblock — "Payment methods attached
+     * to other Customers cannot be used with this PaymentIntent") that a
+     * saved payment method is scoped to the Customer it was attached to via
+     * {@see self::createSetupIntent()}; omitting `customer` here (or
+     * supplying a mismatched one) causes Stripe to reject the charge. This
+     * client method does not itself validate presence — see
+     * {@see StripeDriver::chargeToken()} for the framework-level guard that
+     * rejects a missing value before any Stripe call is attempted.
+     *
+     * `off_session: true` is always set (not caller-configurable — this
+     * driver has no merchant-initiated/customer-initiated distinction
+     * exposed on `TokenChargeRequest`): `chargeToken()`'s own docblock
+     * describes charging "without requiring the customer to re-enter
+     * payment details", i.e. no customer session is present.
+     *
+     * Performs no interpretation of the result or of any exception raised —
+     * both are simply propagated to the caller.
+     *
+     * @param TokenChargeRequest $request The token charge request identifying the token, amount, and provider customer reference.
+     *
+     * @return array<string, mixed> The raw, decoded Stripe PaymentIntent payload.
+     *
+     * @throws \Stripe\Exception\ApiErrorException On any Stripe API error, including {@see \Stripe\Exception\CardException} on decline.
+     */
+    public function createTokenCharge(TokenChargeRequest $request): array
+    {
+        $intent = $this->sdk()->paymentIntents->create(
+            array_filter(
+                [
+                    'amount'         => $request->amount->amount,
+                    'currency'       => strtolower($request->currency->value),
+                    'customer'       => $request->providerCustomerReference,
+                    'payment_method' => $request->token->toString(),
+                    'confirm'        => true,
+                    'off_session'    => true,
+                    'metadata'       => $request->metadata,
+                ],
+                static fn (mixed $value): bool => $value !== null && $value !== [],
+            ),
+            ['idempotency_key' => $request->idempotencyKey],
+        );
+
+        return $intent->toArray();
+    }
+
+    /**
      * Retrieve a PaymentIntent's current state from Stripe.
      *
      * Shared verbatim by both {@see StripeDriver::verify()} and
@@ -334,6 +493,164 @@ final class StripeClient
         // Provider-specific options first, framework-derived $params second —
         // framework values must always win on key collision.
         return array_merge($request->options, $params);
+    }
+
+    /**
+     * Create a Stripe Subscription for the given subscription request.
+     *
+     * `$request->planId` is forwarded as `items[0].price` — verified against
+     * the SDK: `items[].price_data` (Stripe's inline/ad-hoc pricing path)
+     * still requires an existing Stripe *Product* id under `price_data.product`
+     * even when the amount/interval are supplied inline, so there is no
+     * genuinely ad-hoc path available without a pre-existing Stripe catalog
+     * object either way — this driver only supports the pre-existing-Price
+     * path. This method itself performs no validation of `$request->planId`
+     * or `$request->providerCustomerReference` (thin wrapper, no business
+     * logic) — see {@see StripeDriver::createSubscription()} for the
+     * framework-level guards.
+     *
+     * `default_payment_method` is only included when `$request->token` is
+     * present — verified against the SDK that it is genuinely optional:
+     * Stripe falls back to the customer's own stored default payment method
+     * when omitted.
+     *
+     * `expand: ['latest_invoice.payments.data.payment.payment_intent']` is
+     * always requested so a caller can inspect the first invoice's payment
+     * outcome (needed to disambiguate Stripe's `incomplete` status — see
+     * {@see StripeMapper::toSubscriptionResponse()}) without a second round
+     * trip. NOTE: this specific 4-level expand path has NOT been verified
+     * against a live Stripe API call (no network access during development)
+     * — verified only via the SDK's documented `Invoice::$payments` shape,
+     * which replaced the older, no-longer-existent `Invoice::$payment_intent`
+     * property in this SDK version (stripe-php 20.3.1). The mapper handles a
+     * partially- or non-resolved expand defensively rather than assuming it
+     * always succeeds.
+     *
+     * Verified against the SDK: creating a subscription does NOT throw a
+     * synchronous {@see \Stripe\Exception\CardException} on a first-charge
+     * decline the way confirming a PaymentIntent does — a failed first
+     * charge instead surfaces as `Subscription::$status === 'incomplete'`,
+     * inspected via the payload, not an exception. This is unlike
+     * {@see self::createPaymentIntent()}/{@see self::createTokenCharge()}.
+     *
+     * Performs no interpretation of the result or of any exception raised —
+     * both are simply propagated to the caller.
+     *
+     * @param SubscriptionRequest $request The subscription creation request.
+     *
+     * @return array<string, mixed> The raw, decoded Stripe Subscription payload.
+     *
+     * @throws \Stripe\Exception\ApiErrorException On any Stripe API error.
+     */
+    public function createSubscription(SubscriptionRequest $request): array
+    {
+        $subscription = $this->sdk()->subscriptions->create(
+            array_filter(
+                [
+                    'customer'                => $request->providerCustomerReference,
+                    'items'                   => [['price' => $request->planId]],
+                    'default_payment_method'  => $request->token?->toString(),
+                    'trial_period_days'       => $request->hasTrial() ? $request->trialDays : null,
+                    'metadata'                => $request->metadata,
+                    'expand'                  => ['latest_invoice.payments.data.payment.payment_intent'],
+                ],
+                static fn (mixed $value): bool => $value !== null && $value !== [],
+            ),
+            ['idempotency_key' => $request->idempotencyKey],
+        );
+
+        return $subscription->toArray();
+    }
+
+    /**
+     * Cancel a Stripe Subscription immediately, for
+     * {@see StripeDriver::cancelSubscription()} when
+     * `$request->cancelAtPeriodEnd` is false.
+     *
+     * `$request->invoiceNow`/`$request->prorate` are forwarded as-is — both
+     * verified against the SDK as genuine `SubscriptionService::cancel()`
+     * params, only meaningful for immediate cancellation (verified: neither
+     * appears in `SubscriptionService::update()`'s param list — see
+     * {@see self::scheduleSubscriptionCancellation()}).
+     *
+     * `$request->reason` IS forwarded here, as `cancellation_details.comment`
+     * — see {@see CancelSubscriptionRequest}'s own docblock for why this
+     * differs from {@see self::cancelPaymentIntent()}/{@see self::createRefund()},
+     * which deliberately do NOT forward their `$reason`.
+     *
+     * Performs no interpretation of the result or of any exception raised —
+     * both are simply propagated to the caller.
+     *
+     * @param CancelSubscriptionRequest $request The cancellation request (must have cancelAtPeriodEnd === false).
+     *
+     * @return array<string, mixed> The raw, decoded Stripe Subscription payload.
+     *
+     * @throws \Stripe\Exception\ApiErrorException On any Stripe API error.
+     */
+    public function cancelSubscriptionImmediately(CancelSubscriptionRequest $request): array
+    {
+        $subscription = $this->sdk()->subscriptions->cancel(
+            $request->subscriptionId->toString(),
+            array_filter(
+                [
+                    'invoice_now'          => $request->invoiceNow,
+                    'prorate'              => $request->prorate,
+                    'cancellation_details' => $request->reason !== null
+                        ? ['comment' => $request->reason]
+                        : null,
+                ],
+                static fn (mixed $value): bool => $value !== null,
+            ),
+            ['idempotency_key' => $request->idempotencyKey],
+        );
+
+        return $subscription->toArray();
+    }
+
+    /**
+     * Schedule a Stripe Subscription to cancel at the end of the current
+     * billing period, for {@see StripeDriver::cancelSubscription()} when
+     * `$request->cancelAtPeriodEnd` is true.
+     *
+     * A genuinely different Stripe API operation from
+     * {@see self::cancelSubscriptionImmediately()} — verified against the
+     * SDK: `cancel_at_period_end` is an `update()` param, not a `cancel()`
+     * param. The subscription remains fully active until the period ends;
+     * it does NOT become `canceled` as a result of this call (verified via
+     * `Subscription::$cancel_at_period_end`'s own docblock: "Whether this
+     * subscription will (if status=active)... cancel at the end of the
+     * current billing period").
+     *
+     * `$request->invoiceNow`/`$request->prorate` are intentionally NOT
+     * forwarded here — verified against the SDK that neither is a valid
+     * `update()` param for this purpose.
+     *
+     * Performs no interpretation of the result or of any exception raised —
+     * both are simply propagated to the caller.
+     *
+     * @param CancelSubscriptionRequest $request The cancellation request (must have cancelAtPeriodEnd === true).
+     *
+     * @return array<string, mixed> The raw, decoded Stripe Subscription payload.
+     *
+     * @throws \Stripe\Exception\ApiErrorException On any Stripe API error.
+     */
+    public function scheduleSubscriptionCancellation(CancelSubscriptionRequest $request): array
+    {
+        $subscription = $this->sdk()->subscriptions->update(
+            $request->subscriptionId->toString(),
+            array_filter(
+                [
+                    'cancel_at_period_end' => true,
+                    'cancellation_details'  => $request->reason !== null
+                        ? ['comment' => $request->reason]
+                        : null,
+                ],
+                static fn (mixed $value): bool => $value !== null,
+            ),
+            ['idempotency_key' => $request->idempotencyKey],
+        );
+
+        return $subscription->toArray();
     }
 
     /**

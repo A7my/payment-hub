@@ -6,6 +6,7 @@ namespace Mifatoyeh\LaravelPaymentFramework\Facades;
 
 use Illuminate\Support\Facades\Facade;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\PaymentDriverContract;
+use Mifatoyeh\LaravelPaymentFramework\DTO\CancelSubscriptionRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CaptureRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentLinkRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentRequest;
@@ -27,7 +28,6 @@ use Mifatoyeh\LaravelPaymentFramework\Responses\VerificationResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\VoidResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\WebhookResponse;
 use Mifatoyeh\LaravelPaymentFramework\Testing\FakePaymentDriver;
-use Mifatoyeh\LaravelPaymentFramework\ValueObjects\TransactionId;
 
 /**
  * Laravel Facade providing a clean, expressive API for the payment framework.
@@ -72,7 +72,7 @@ use Mifatoyeh\LaravelPaymentFramework\ValueObjects\TransactionId;
  * @method static PaymentResponse      saveCard(SaveCardRequest $request)
  * @method static PaymentResponse      chargeToken(TokenChargeRequest $request)
  * @method static SubscriptionResponse createSubscription(SubscriptionRequest $request)
- * @method static SubscriptionResponse cancelSubscription(TransactionId $subscriptionId)
+ * @method static SubscriptionResponse cancelSubscription(CancelSubscriptionRequest $request)
  * @method static WebhookResponse      processWebhook(WebhookRequest $request)
  * @method static bool                 verifyWebhookSignature(WebhookRequest $request)
  *

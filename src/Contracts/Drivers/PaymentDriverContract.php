@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers;
 
+use Mifatoyeh\LaravelPaymentFramework\DTO\CancelSubscriptionRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CaptureRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentLinkRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentRequest;
@@ -23,7 +24,6 @@ use Mifatoyeh\LaravelPaymentFramework\Responses\SubscriptionResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\VerificationResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\VoidResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\WebhookResponse;
-use Mifatoyeh\LaravelPaymentFramework\ValueObjects\TransactionId;
 
 /**
  * The central contract that every payment driver must implement.
@@ -147,13 +147,24 @@ interface PaymentDriverContract
     public function createSubscription(SubscriptionRequest $request): SubscriptionResponse;
 
     /**
-     * Cancel an active subscription.
+     * Cancel an active subscription, either immediately or at the end of the
+     * current billing period.
      *
-     * @param TransactionId $subscriptionId The provider's subscription identifier.
+     * BREAKING CHANGE (deliberate): this method previously took a bare
+     * TransactionId, which could not express cancellation semantics at all
+     * — see {@see CancelSubscriptionRequest}'s own docblock for why a
+     * request DTO is required here, the same way every other mutating
+     * operation in this contract already takes one.
      *
-     * @return SubscriptionResponse A standardised subscription response with Cancelled status.
+     * @param CancelSubscriptionRequest $request The cancellation request DTO.
+     *
+     * @return SubscriptionResponse A standardised subscription response. NOTE:
+     *         does NOT always carry `Cancelled` status — a cancel-at-period-end
+     *         request leaves the subscription active until the period ends;
+     *         see the implementing driver's documentation for its exact status
+     *         mapping in that case.
      */
-    public function cancelSubscription(TransactionId $subscriptionId): SubscriptionResponse;
+    public function cancelSubscription(CancelSubscriptionRequest $request): SubscriptionResponse;
 
     /**
      * Process an inbound webhook event from the provider.
