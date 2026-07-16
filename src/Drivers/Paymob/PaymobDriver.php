@@ -569,22 +569,38 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
         $email = $request->customer?->email ?? 'guest@example.invalid';
         $phone = $request->customer?->phone;
 
-        $step = 'authenticate';
+        $step        = 'init';
+        $billingData = $this->client->billingDataFrom($name, $email, $phone);
 
         try {
-            $authToken = $this->withRetry(fn () => $this->client->authenticate());
+            if ($this->client->isKsaMode()) {
+                // KSA: single Intention API call → hosted unified checkout URL
+                $step      = 'createIntention';
+                $intention = $this->withRetry(fn () => $this->client->createIntention(
+                    $request->amount->amount,
+                    $request->currency->value,
+                    $billingData,
+                    $request->idempotencyKey,
+                ));
+                $clientSecret = (string) ($intention['client_secret'] ?? '');
+                $url          = $this->client->buildKsaCheckoutUrl($clientSecret);
+                $response     = $this->mapper->toPaymentLinkResponse($url, $intention);
+            } else {
+                // Egypt: authenticate → createOrder → requestPaymentKey → iframe
+                $step      = 'authenticate';
+                $authToken = $this->withRetry(fn () => $this->client->authenticate());
 
-            $step  = 'createOrder';
-            $order = $this->withRetry(fn () => $this->client->createOrder($authToken, $request->amount->amount, $request->currency->value, $request->idempotencyKey));
-            $orderId = (int) ($order['id'] ?? 0);
+                $step    = 'createOrder';
+                $order   = $this->withRetry(fn () => $this->client->createOrder($authToken, $request->amount->amount, $request->currency->value, $request->idempotencyKey));
+                $orderId = (int) ($order['id'] ?? 0);
 
-            $step               = 'requestPaymentKey';
-            $billingData        = $this->client->billingDataFrom($name, $email, $phone);
-            $paymentKeyResponse = $this->withRetry(fn () => $this->client->requestPaymentKey($authToken, $orderId, $request->amount->amount, $request->currency->value, $billingData));
-            $paymentKey         = (string) ($paymentKeyResponse['token'] ?? '');
+                $step               = 'requestPaymentKey';
+                $paymentKeyResponse = $this->withRetry(fn () => $this->client->requestPaymentKey($authToken, $orderId, $request->amount->amount, $request->currency->value, $billingData));
+                $paymentKey         = (string) ($paymentKeyResponse['token'] ?? '');
 
-            $url      = $this->client->buildIframeUrl($paymentKey);
-            $response = $this->mapper->toPaymentLinkResponse($url, $order);
+                $url      = $this->client->buildIframeUrl($paymentKey);
+                $response = $this->mapper->toPaymentLinkResponse($url, $order);
+            }
 
             $this->dispatchEvent(new PaymentLinkCreated($request, $response));
             $this->logInfo('Payment link created', $this->buildLogContext('createPaymentLink', [

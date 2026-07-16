@@ -80,6 +80,9 @@ return [
             // and attaches Authorization: Bearer <secret_key> to every request.
             'secret_key'     => env('PAYMOB_SECRET_KEY'),
 
+            // Paymob KSA public key — used to build the hosted checkout URL.
+            'public_key'     => env('PAYMOB_PUBLIC_KEY'),
+
             // Paymob "Integration ID" for the online-card payment method
             // (dashboard: Developers > Payment Integrations). Required for
             // every payment-key request.

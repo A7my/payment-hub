@@ -84,35 +84,16 @@ final class PaymobClient
     /**
      * Exchange the configured API key for a short-lived auth token.
      *
-     * UNVERIFIED: `POST {base_url}/auth/tokens` with `{"api_key": "..."}`,
-     * expected to return `{"token": "..."}`. Paymob auth tokens are
-     * documented (per general knowledge, not verified here) to expire after
-     * roughly one hour — this method requests a fresh one on every call
-     * rather than caching/reusing across requests, matching this package's
-     * "don't over-engineer" convention (no cache store dependency is
-     * available to a driver).
+     * Egypt/Accept mode: POSTs `{"api_key": "..."}` to `/auth/tokens` and
+     * returns the short-lived token for use in subsequent request bodies.
      *
-     * **KSA mode**: When {@see self::isKsaMode()} is true the `/auth/tokens`
-     * HTTP call is skipped entirely — the KSA platform authenticates via a
-     * static Bearer header on every request (see {@see self::request()}) and
-     * does not expose `/auth/tokens`. The configured `secret_key` is returned
-     * directly and carried through to subsequent calls, but it is never
-     * injected into request bodies (see {@see self::authBody()}).
+     * KSA mode: skips the HTTP call entirely — the KSA platform uses the
+     * Intention API with static Bearer auth. Returns the secret_key directly
+     * so the driver call-sites stay unchanged.
      *
-     * A blank/missing credential for the active mode throws immediately here
-     * rather than being silently carried forward: in KSA mode specifically,
-     * this method makes no real HTTP call at all (it just returns config),
-     * so an empty `secret_key` would otherwise "succeed" here and only
-     * surface as a confusing 401 on whichever call happens next (e.g.
-     * `createOrder()`) — indistinguishable from the secret key itself being
-     * wrong rather than simply absent. Failing at the actual misconfigured
-     * step, with a message naming exactly which config key is missing, is
-     * more useful than a generic downstream "incorrect credentials".
+     * @return string The auth token (Egypt) or secret_key passthrough (KSA).
      *
-     * @return string The auth token to pass to every subsequent call in this sequence.
-     *
-     * @throws PaymobApiException On any non-2xx Paymob response, or when the
-     *         credential required for the active mode is blank/missing.
+     * @throws PaymobApiException When the required credential is blank/missing.
      */
     public function authenticate(): string
     {
@@ -121,10 +102,7 @@ final class PaymobClient
 
             if ($secretKey === '') {
                 throw new PaymobApiException(
-                    'PAYMOB_SECRET_KEY is empty, but KSA mode was detected (base_url contains ' .
-                    '"ksa.paymob.com", or a secret_key with a KSA prefix was expected). Set ' .
-                    'PAYMOB_SECRET_KEY to your Paymob KSA dashboard secret key (starts with ' .
-                    '"sau_sk_test_" or "sau_sk_live_").',
+                    'PAYMOB_SECRET_KEY is empty. Set it to your Paymob KSA secret key (sau_sk_test_... or sau_sk_live_...).',
                     401,
                 );
             }
@@ -136,8 +114,7 @@ final class PaymobClient
 
         if ($apiKey === '') {
             throw new PaymobApiException(
-                'PAYMOB_API_KEY is empty. Set it to your Paymob (Egypt/Accept) dashboard API key, ' .
-                'or configure PAYMOB_SECRET_KEY + PAYMOB_BASE_URL for a KSA account instead.',
+                'PAYMOB_API_KEY is empty. Set it to your Paymob Egypt/Accept dashboard API key.',
                 401,
             );
         }
@@ -149,6 +126,70 @@ final class PaymobClient
         $body = $this->decode($response, 'authenticate');
 
         return (string) ($body['token'] ?? '');
+    }
+
+    /**
+     * Create a KSA Intention — the single API call that replaces the
+     * Egypt three-step sequence (createOrder → requestPaymentKey → iframe).
+     *
+     * POST https://ksa.paymob.com/v1/intention/
+     * Auth: Bearer <secret_key>
+     *
+     * Returns the full intention payload. Key fields:
+     *  - client_secret  (sau_csk_...) → used to build the hosted checkout URL
+     *  - payment_keys[0].key          → legacy payment token (also usable)
+     *  - intention_order_id           → Paymob order reference
+     *
+     * @param int                  $amountCents
+     * @param string               $currency
+     * @param array<string, mixed> $billingData
+     * @param string               $merchantOrderId
+     *
+     * @return array<string, mixed>
+     *
+     * @throws PaymobApiException
+     */
+    public function createIntention(
+        int $amountCents,
+        string $currency,
+        array $billingData,
+        string $merchantOrderId,
+    ): array {
+        $response = $this->request()->post('/v1/intention/', [
+            'amount'           => $amountCents,
+            'currency'         => $currency,
+            'payment_methods'  => [(int) ($this->config['integration_id'] ?? 0)],
+            'items'            => [[
+                'name'        => 'Order ' . $merchantOrderId,
+                'amount'      => $amountCents,
+                'description' => 'Order ' . $merchantOrderId,
+                'quantity'    => 1,
+            ]],
+            'billing_data'     => $billingData,
+            'special_reference' => $merchantOrderId,
+        ]);
+
+        return $this->decode($response, 'createIntention');
+    }
+
+    /**
+     * Build the KSA hosted checkout URL from a client_secret.
+     *
+     * https://ksa.paymob.com/unifiedcheckout/?publicKey=<pub>&clientSecret=<csk>
+     *
+     * @param string $clientSecret  The `client_secret` (sau_csk_...) from createIntention().
+     *
+     * @return string
+     */
+    public function buildKsaCheckoutUrl(string $clientSecret): string
+    {
+        $publicKey = (string) ($this->config['public_key'] ?? '');
+
+        return sprintf(
+            'https://ksa.paymob.com/unifiedcheckout/?publicKey=%s&clientSecret=%s',
+            urlencode($publicKey),
+            urlencode($clientSecret),
+        );
     }
 
     /**
@@ -304,7 +345,7 @@ final class PaymobClient
      *
      * UNVERIFIED: `POST {base_url}/acceptance/void_refund/refund`. Shared
      * by both refund() and partialRefund() at the driver level, the same
-     * way {@see StripeClient::createRefund()} is — `$amountCents` alone
+     * way {@see is — `$amountCents` alone
      * distinguishes a full vs. partial refund; Paymob itself decides which
      * happened server-side.
      *
@@ -408,7 +449,7 @@ final class PaymobClient
      * `Authorization: Bearer` header, and {@see self::authBody()} returns
      * an empty array so no `auth_token` field appears in any request body.
      */
-    private function isKsaMode(): bool
+    public function isKsaMode(): bool
     {
         $baseUrl   = (string) ($this->config['base_url'] ?? '');
         $secretKey = (string) ($this->config['secret_key'] ?? '');
@@ -435,33 +476,31 @@ final class PaymobClient
     }
 
     /**
-     * Lazily build a pre-configured pending HTTP request against Paymob's base URL.
+     * Lazily build a pre-configured pending HTTP request.
      *
-     * In KSA mode an `Authorization: Token <secret_key>` header is added to
-     * every outgoing request via `->withToken()`. UNVERIFIED but high
-     * confidence: the `Token` scheme (not Laravel's `withToken()` default of
-     * `Bearer`) was chosen after a live 401 came back with the message
-     * "Authentication credentials were not provided." — the exact stock
-     * error Django REST Framework's `TokenAuthentication` returns when no
-     * credentials are found in a scheme it recognises. DRF's
-     * `TokenAuthentication` specifically expects the `Token` prefix, not
-     * `Bearer`; Paymob's KSA API is very likely built on DRF. If this still
-     * 401s, the header scheme is not the (only) remaining problem — check
-     * Paymob's actual KSA API reference for the exact expected auth header,
-     * since this project has no way to verify it independently.
-     *
-     * In Egypt/Accept mode the builder is unchanged — auth is handled via
-     * body fields instead.
+     * Egypt mode: base_url is e.g. https://accept.paymob.com/api — auth via body fields.
+     * KSA mode:   base_url is https://ksa.paymob.com/api for legacy paths, but the
+     *             Intention API lives at the root https://ksa.paymob.com — so we strip
+     *             the /api suffix for KSA and let each method provide its full path
+     *             (e.g. /v1/intention/, /ecommerce/orders, etc.).
+     *             Auth is via Authorization: Bearer <secret_key>.
      */
     private function request(): PendingRequest
     {
+        $baseUrl = rtrim((string) ($this->config['base_url'] ?? 'https://accept.paymob.com/api'), '/');
+
+        if ($this->isKsaMode()) {
+            // Strip /api suffix — KSA Intention API lives at root
+            $baseUrl = rtrim(str_replace('/api', '', $baseUrl), '/');
+        }
+
         $pending = $this->http
-            ->baseUrl(rtrim((string) ($this->config['base_url'] ?? 'https://accept.paymob.com/api'), '/'))
+            ->baseUrl($baseUrl)
             ->timeout((int) ($this->config['timeout'] ?? 30))
             ->acceptJson();
 
         if ($this->isKsaMode()) {
-            $pending = $pending->withToken((string) ($this->config['secret_key'] ?? ''), 'Token');
+            $pending = $pending->withToken((string) ($this->config['secret_key'] ?? ''), 'Bearer');
         }
 
         return $pending;
