@@ -1,0 +1,383 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Mifatoyeh\LaravelPaymentFramework\Drivers\Paymob;
+
+use Illuminate\Http\Client\Factory as HttpFactory;
+use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Http\Client\Response;
+
+/**
+ * Thin transport wrapper around Paymob's Accept API.
+ *
+ * UNVERIFIED AGAINST LIVE PAYMOB DOCS: Paymob has no official Composer/PHP
+ * SDK (unlike {@see \Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe\StripeClient},
+ * which wraps `stripe/stripe-php` and could be verified by reading real SDK
+ * source). Every endpoint path, request field name, and response shape below
+ * is built from general knowledge of Paymob's Accept API and has NOT been
+ * checked against Paymob's current live documentation or a real API call.
+ * Treat every method's docblock claim about field names as a hypothesis to
+ * confirm before this touches production traffic.
+ *
+ * Responsible ONLY for HTTP communication with Paymob — no business logic,
+ * no status interpretation, no framework Response construction (that is
+ * {@see PaymobDriver}'s and {@see PaymobMapper}'s job respectively). Every
+ * method returns the raw, JSON-decoded Paymob payload as an array.
+ *
+ * Paymob's API requires a short-lived auth token (via {@see self::authenticate()})
+ * on almost every subsequent call, and most operations (charge, save a card,
+ * generate a hosted payment link) require first creating an "order" and then
+ * requesting a "payment key" scoped to that order — a 3-call sequence before
+ * any actual charge happens. Mirroring {@see StripeClient}'s own convention
+ * (one Paymob endpoint per method; multi-call sequencing is orchestration and
+ * lives in {@see PaymobDriver}, not here), each method below wraps exactly
+ * one Paymob endpoint.
+ *
+ * HTTP transport is `Illuminate\Http\Client\Factory` (bundled with
+ * `laravel/framework`, already a direct dependency of this package) rather
+ * than raw Guzzle or the `Http` facade — this keeps testing consistent with
+ * the plain-PHPUnit-TestCase convention used throughout this package (no
+ * Orchestra Testbench / full framework bootstrap required): a `Factory`
+ * instance can be constructed and faked (`Factory::fake()`) entirely
+ * standalone, verified directly against this exact class/version.
+ */
+final class PaymobClient
+{
+    /**
+     * Test-only global override, checked by every new instance's
+     * constructor when no explicit `$httpFactory` is passed in. Mirrors the
+     * Stripe SDK's own `\Stripe\ApiRequestor::setHttpClient()` global-swap
+     * seam: {@see \Mifatoyeh\LaravelPaymentFramework\Drivers\Paymob\PaymobDriver}
+     * builds a `PaymobClient` internally from just `$config` (no injectable
+     * collaborators, by design — see `StripeDriver`'s own docblock for why),
+     * so driver-level tests need a way to intercept HTTP traffic without a
+     * constructor parameter to hook into. Tests MUST reset this to `null`
+     * in `tearDown()`.
+     */
+    private static ?HttpFactory $testHttpFactory = null;
+
+    private readonly HttpFactory $http;
+
+    /**
+     * @param array<string, mixed> $config The driver's config block from payment.drivers.paymob
+     *                                      (api_key, integration_id, base_url, timeout, etc.).
+     */
+    public function __construct(
+        private readonly array $config = [],
+        ?HttpFactory $httpFactory = null,
+    ) {
+        $this->http = $httpFactory ?? self::$testHttpFactory ?? new HttpFactory();
+    }
+
+    /**
+     * Install (or clear, with `null`) a global fake HTTP factory used by
+     * every `PaymobClient` instance constructed afterwards that doesn't
+     * receive its own `$httpFactory` explicitly. Test-only — see
+     * {@see self::$testHttpFactory}'s own docblock.
+     */
+    public static function setTestHttpFactory(?HttpFactory $factory): void
+    {
+        self::$testHttpFactory = $factory;
+    }
+
+    /**
+     * Exchange the configured API key for a short-lived auth token.
+     *
+     * UNVERIFIED: `POST {base_url}/auth/tokens` with `{"api_key": "..."}`,
+     * expected to return `{"token": "..."}`. Paymob auth tokens are
+     * documented (per general knowledge, not verified here) to expire after
+     * roughly one hour — this method requests a fresh one on every call
+     * rather than caching/reusing across requests, matching this package's
+     * "don't over-engineer" convention (no cache store dependency is
+     * available to a driver).
+     *
+     * @return string The auth token to pass to every subsequent call in this sequence.
+     *
+     * @throws PaymobApiException On any non-2xx Paymob response.
+     */
+    public function authenticate(): string
+    {
+        $response = $this->request()->post('/auth/tokens', [
+            'api_key' => (string) ($this->config['api_key'] ?? ''),
+        ]);
+
+        $body = $this->decode($response, 'authenticate');
+
+        return (string) ($body['token'] ?? '');
+    }
+
+    /**
+     * Register a Paymob "order" — required before requesting a payment key.
+     *
+     * UNVERIFIED: `POST {base_url}/ecommerce/orders`.
+     *
+     * @param string $authToken       From {@see self::authenticate()}.
+     * @param int    $amountCents     Amount in the smallest currency unit.
+     * @param string $currency        ISO 4217 currency code.
+     * @param string $merchantOrderId Caller-supplied reference (this package forwards the
+     *                                framework request's idempotency key here) — Paymob
+     *                                uses this for dashboard reconciliation; UNVERIFIED
+     *                                whether Paymob itself treats it as an idempotency
+     *                                guarantee the way Stripe's `idempotency_key` header does.
+     *
+     * @return array<string, mixed> The raw, decoded Paymob order payload (needs `id`).
+     *
+     * @throws PaymobApiException On any non-2xx Paymob response.
+     */
+    public function createOrder(string $authToken, int $amountCents, string $currency, string $merchantOrderId): array
+    {
+        $response = $this->request()->post('/ecommerce/orders', [
+            'auth_token'        => $authToken,
+            'delivery_needed'   => false,
+            'amount_cents'      => $amountCents,
+            'currency'          => $currency,
+            'merchant_order_id' => $merchantOrderId,
+            'items'             => [],
+        ]);
+
+        return $this->decode($response, 'createOrder');
+    }
+
+    /**
+     * Request a payment key scoped to a specific order — the token actually
+     * used to charge a card or build a hosted checkout URL.
+     *
+     * UNVERIFIED: `POST {base_url}/acceptance/payment_keys`. `billing_data`
+     * is documented (per general knowledge) as required with a fixed set of
+     * keys; Paymob is known to accept the literal string `"NA"` for fields
+     * the caller doesn't have — {@see PaymobDriver} fills gaps this way
+     * rather than rejecting a request over optional framework fields Paymob
+     * happens to require.
+     *
+     * @param string               $authToken   From {@see self::authenticate()}.
+     * @param int                  $orderId     From {@see self::createOrder()}'s response `id`.
+     * @param int                  $amountCents Amount in the smallest currency unit — must match the order.
+     * @param string               $currency    ISO 4217 currency code.
+     * @param array<string, mixed> $billingData Paymob's required billing_data shape (first_name, last_name,
+     *                                          email, phone_number, and address fields — "NA" for unknowns).
+     *
+     * @return array<string, mixed> The raw, decoded Paymob payload (needs `token`).
+     *
+     * @throws PaymobApiException On any non-2xx Paymob response.
+     */
+    public function requestPaymentKey(
+        string $authToken,
+        int $orderId,
+        int $amountCents,
+        string $currency,
+        array $billingData,
+    ): array {
+        $response = $this->request()->post('/acceptance/payment_keys', [
+            'auth_token'      => $authToken,
+            'amount_cents'    => $amountCents,
+            'expiration'      => 3600,
+            'order_id'        => $orderId,
+            'billing_data'    => $billingData,
+            'currency'        => $currency,
+            'integration_id'  => (int) ($this->config['integration_id'] ?? 0),
+        ]);
+
+        return $this->decode($response, 'requestPaymentKey');
+    }
+
+    /**
+     * Charge (or authorise) a payment key against a previously-tokenised
+     * Paymob payment method — never raw card data.
+     *
+     * UNVERIFIED: `POST {base_url}/acceptance/payments/pay` with
+     * `source.subtype: "TOKEN"`. See {@see PaymobDriver}'s class docblock
+     * for why this driver only ever sends `TOKEN`, never `CARD` (raw PAN) —
+     * a deliberate, flagged design decision, not an oversight.
+     *
+     * @param string $paymentKey From {@see self::requestPaymentKey()}.
+     * @param string $token      A Paymob-issued reusable card token (never raw card data).
+     *
+     * @return array<string, mixed> The raw, decoded Paymob Transaction payload.
+     *
+     * @throws PaymobApiException On any non-2xx Paymob response.
+     */
+    public function payWithToken(string $paymentKey, string $token): array
+    {
+        $response = $this->request()->post('/acceptance/payments/pay', [
+            'source' => [
+                'identifier' => $token,
+                'subtype'    => 'TOKEN',
+            ],
+            'payment_token' => $paymentKey,
+        ]);
+
+        return $this->decode($response, 'payWithToken');
+    }
+
+    /**
+     * Void a previously authorised (not yet captured) transaction.
+     *
+     * UNVERIFIED: `POST {base_url}/acceptance/void_refund/void`.
+     *
+     * @return array<string, mixed> The raw, decoded Paymob Transaction payload reflecting the voided state.
+     *
+     * @throws PaymobApiException On any non-2xx Paymob response.
+     */
+    public function voidTransaction(string $authToken, string $transactionId): array
+    {
+        $response = $this->request()->post('/acceptance/void_refund/void', [
+            'auth_token'     => $authToken,
+            'transaction_id' => $transactionId,
+        ]);
+
+        return $this->decode($response, 'voidTransaction');
+    }
+
+    /**
+     * Capture funds from a previously authorised transaction.
+     *
+     * UNVERIFIED — the LEAST confident endpoint in this client: Paymob's
+     * distinction between "authorise-only" and "immediate capture" is not
+     * confirmed here (it may require an additional flag on
+     * {@see self::payWithToken()}'s request, not just a separate capture
+     * call). `POST {base_url}/acceptance/capture` is a best-effort guess at
+     * the endpoint shape, modelled after {@see self::voidTransaction()}'s
+     * and {@see self::refundTransaction()}'s pattern.
+     *
+     * @return array<string, mixed> The raw, decoded Paymob Transaction payload.
+     *
+     * @throws PaymobApiException On any non-2xx Paymob response.
+     */
+    public function captureTransaction(string $authToken, string $transactionId, int $amountCents): array
+    {
+        $response = $this->request()->post('/acceptance/capture', [
+            'auth_token'     => $authToken,
+            'transaction_id' => $transactionId,
+            'amount_cents'   => $amountCents,
+        ]);
+
+        return $this->decode($response, 'captureTransaction');
+    }
+
+    /**
+     * Refund (fully or partially) a previously captured transaction.
+     *
+     * UNVERIFIED: `POST {base_url}/acceptance/void_refund/refund`. Shared
+     * by both refund() and partialRefund() at the driver level, the same
+     * way {@see StripeClient::createRefund()} is — `$amountCents` alone
+     * distinguishes a full vs. partial refund; Paymob itself decides which
+     * happened server-side.
+     *
+     * @return array<string, mixed> The raw, decoded Paymob Transaction payload.
+     *
+     * @throws PaymobApiException On any non-2xx Paymob response.
+     */
+    public function refundTransaction(string $authToken, string $transactionId, int $amountCents): array
+    {
+        $response = $this->request()->post('/acceptance/void_refund/refund', [
+            'auth_token'     => $authToken,
+            'transaction_id' => $transactionId,
+            'amount_cents'   => $amountCents,
+        ]);
+
+        return $this->decode($response, 'refundTransaction');
+    }
+
+    /**
+     * Retrieve a transaction's current state.
+     *
+     * UNVERIFIED: `GET {base_url}/acceptance/transactions/{id}?token={authToken}`
+     * — modelled on Paymob's documented convention (per general knowledge)
+     * of GET endpoints taking the auth token as a query parameter rather
+     * than a JSON body, since GET requests carry no body.
+     *
+     * @return array<string, mixed> The raw, decoded Paymob Transaction payload.
+     *
+     * @throws PaymobApiException On any non-2xx Paymob response.
+     */
+    public function retrieveTransaction(string $authToken, string $transactionId): array
+    {
+        $response = $this->request()->get("/acceptance/transactions/{$transactionId}", [
+            'token' => $authToken,
+        ]);
+
+        return $this->decode($response, 'retrieveTransaction');
+    }
+
+    /**
+     * Build the hosted Paymob iframe checkout URL for a payment key.
+     *
+     * UNVERIFIED: `{base_url}/acceptance/iframes/{iframe_id}?payment_token={paymentKey}`
+     * — no API call, just URL construction (this is how a customer's browser
+     * is redirected to Paymob's own hosted card-entry page).
+     *
+     * @return string The hosted checkout URL to redirect the customer to.
+     */
+    public function buildIframeUrl(string $paymentKey): string
+    {
+        $iframeId = (string) ($this->config['iframe_id'] ?? '');
+        $baseUrl  = rtrim((string) ($this->config['base_url'] ?? 'https://accept.paymob.com/api'), '/');
+
+        return sprintf('%s/acceptance/iframes/%s?payment_token=%s', $baseUrl, $iframeId, $paymentKey);
+    }
+
+    /**
+     * Build a Paymob billing_data array, filling gaps with "NA" — verified
+     * only in the sense that Paymob is documented (per general knowledge)
+     * to accept literal "NA" strings for unknown optional-in-practice
+     * fields it nonetheless requires present in the request body.
+     *
+     * @return array<string, string>
+     */
+    public function billingDataFrom(string $name, string $email, ?string $phone): array
+    {
+        $parts     = array_filter(explode(' ', trim($name), 2));
+        $firstName = $parts[0] ?? 'NA';
+        $lastName  = $parts[1] ?? 'NA';
+
+        return [
+            'first_name'      => $firstName,
+            'last_name'       => $lastName,
+            'email'           => $email,
+            'phone_number'    => $phone !== null && $phone !== '' ? $phone : 'NA',
+            'apartment'       => 'NA',
+            'floor'           => 'NA',
+            'street'          => 'NA',
+            'building'        => 'NA',
+            'shipping_method' => 'NA',
+            'postal_code'     => 'NA',
+            'city'            => 'NA',
+            'country'         => 'NA',
+            'state'           => 'NA',
+        ];
+    }
+
+    /**
+     * Lazily build a pre-configured pending HTTP request against Paymob's base URL.
+     */
+    private function request(): PendingRequest
+    {
+        return $this->http
+            ->baseUrl(rtrim((string) ($this->config['base_url'] ?? 'https://accept.paymob.com/api'), '/'))
+            ->timeout((int) ($this->config['timeout'] ?? 30))
+            ->acceptJson();
+    }
+
+    /**
+     * Decode a Paymob HTTP response, throwing {@see PaymobApiException} on
+     * any non-2xx status rather than letting a malformed/failed response
+     * silently propagate as an empty array.
+     *
+     * @return array<string, mixed>
+     *
+     * @throws PaymobApiException
+     */
+    private function decode(Response $response, string $operation): array
+    {
+        $body = (array) $response->json();
+
+        if ($response->failed()) {
+            $message = (string) ($body['detail'] ?? $body['message'] ?? "Paymob {$operation} request failed.");
+
+            throw new PaymobApiException($message, $response->status(), $body);
+        }
+
+        return $body;
+    }
+}

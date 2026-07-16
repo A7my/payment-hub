@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Mifatoyeh\LaravelPaymentFramework\Drivers\Paymob\PaymobDriver;
 use Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe\StripeDriver;
 
 /**
@@ -55,6 +56,44 @@ return [
             'webhook_secret' => env('STRIPE_WEBHOOK_SECRET'),
 
             // When true, the driver targets the provider's sandbox/test endpoint.
+            'sandbox'        => env('PAYMENT_SANDBOX', true),
+
+            // HTTP request timeout in seconds.
+            'timeout'        => (int) env('PAYMENT_TIMEOUT', 30),
+        ],
+
+        'paymob' => [
+            // The built-in Paymob driver implementation. Not configurable —
+            // driver classes are an internal detail of this package.
+            'class'          => PaymobDriver::class,
+
+            // Paymob "secret key" (dashboard: Developers > API Keys), used to
+            // obtain a short-lived auth token for every request sequence.
+            'api_key'        => env('PAYMOB_API_KEY'),
+
+            // Paymob "Integration ID" for the online-card payment method
+            // (dashboard: Developers > Payment Integrations). Required for
+            // every payment-key request.
+            'integration_id' => env('PAYMOB_INTEGRATION_ID'),
+
+            // Paymob "Iframe ID" (dashboard: Developers > iFrames) — used to
+            // build the hosted checkout URL for createPaymentLink().
+            'iframe_id'      => env('PAYMOB_IFRAME_ID'),
+
+            // HMAC secret (dashboard: Developers > Payment Integrations) for
+            // webhook signature verification. Not yet used — webhooks are
+            // not implemented for this driver.
+            'hmac_secret'    => env('PAYMOB_HMAC_SECRET'),
+
+            // Base API URL — override for a different Paymob region
+            // (e.g. https://ksa.paymob.com/api for Saudi Arabia).
+            'base_url'       => env('PAYMOB_BASE_URL', 'https://accept.paymob.com/api'),
+
+            // When true, the driver still targets the same base_url — Paymob
+            // has no separate sandbox host; test-mode behaviour is controlled
+            // by which API keys/integration IDs you configure (test vs. live
+            // credentials from the Paymob dashboard). Kept for interface
+            // consistency with other drivers and for driver-side logging.
             'sandbox'        => env('PAYMENT_SANDBOX', true),
 
             // HTTP request timeout in seconds.
