@@ -78,6 +78,61 @@ final class PaymobClientTest extends TestCase
         (new PaymobClient($this->config(), $http))->authenticate();
     }
 
+    /** @test */
+    public function test_authenticate_with_blank_api_key_throws_before_any_http_call(): void
+    {
+        $http = new HttpFactory();
+        $http->fake(['*' => $http::response(['token' => 'should_never_be_called'], 200)]);
+
+        $config = $this->config();
+        $config['api_key'] = '';
+
+        $this->expectException(PaymobApiException::class);
+        $this->expectExceptionMessageMatches('/PAYMOB_API_KEY is empty/');
+
+        try {
+            (new PaymobClient($config, $http))->authenticate();
+        } finally {
+            $http->assertNothingSent();
+        }
+    }
+
+    /** @test */
+    public function test_authenticate_ksa_mode_with_blank_secret_key_throws_before_any_http_call(): void
+    {
+        $http = new HttpFactory();
+        $http->fake(['*' => $http::response(['id' => 1], 200)]);
+
+        $config = $this->config();
+        $config['base_url']  = 'https://ksa.paymob.com/api';
+        $config['secret_key'] = '';
+
+        $this->expectException(PaymobApiException::class);
+        $this->expectExceptionMessageMatches('/PAYMOB_SECRET_KEY is empty/');
+
+        try {
+            (new PaymobClient($config, $http))->authenticate();
+        } finally {
+            $http->assertNothingSent();
+        }
+    }
+
+    /** @test */
+    public function test_authenticate_ksa_mode_with_valid_secret_key_returns_it_without_any_http_call(): void
+    {
+        $http = new HttpFactory();
+        $http->fake(['*' => $http::response(['id' => 1], 200)]);
+
+        $config = $this->config();
+        $config['base_url']  = 'https://ksa.paymob.com/api';
+        $config['secret_key'] = 'sau_sk_test_abc123';
+
+        $token = (new PaymobClient($config, $http))->authenticate();
+
+        $this->assertSame('sau_sk_test_abc123', $token);
+        $http->assertNothingSent();
+    }
+
     // =========================================================================
     // createOrder()
     // =========================================================================

@@ -99,18 +99,51 @@ final class PaymobClient
      * directly and carried through to subsequent calls, but it is never
      * injected into request bodies (see {@see self::authBody()}).
      *
+     * A blank/missing credential for the active mode throws immediately here
+     * rather than being silently carried forward: in KSA mode specifically,
+     * this method makes no real HTTP call at all (it just returns config),
+     * so an empty `secret_key` would otherwise "succeed" here and only
+     * surface as a confusing 401 on whichever call happens next (e.g.
+     * `createOrder()`) — indistinguishable from the secret key itself being
+     * wrong rather than simply absent. Failing at the actual misconfigured
+     * step, with a message naming exactly which config key is missing, is
+     * more useful than a generic downstream "incorrect credentials".
+     *
      * @return string The auth token to pass to every subsequent call in this sequence.
      *
-     * @throws PaymobApiException On any non-2xx Paymob response.
+     * @throws PaymobApiException On any non-2xx Paymob response, or when the
+     *         credential required for the active mode is blank/missing.
      */
     public function authenticate(): string
     {
         if ($this->isKsaMode()) {
-            return (string) ($this->config['secret_key'] ?? '');
+            $secretKey = (string) ($this->config['secret_key'] ?? '');
+
+            if ($secretKey === '') {
+                throw new PaymobApiException(
+                    'PAYMOB_SECRET_KEY is empty, but KSA mode was detected (base_url contains ' .
+                    '"ksa.paymob.com", or a secret_key with a KSA prefix was expected). Set ' .
+                    'PAYMOB_SECRET_KEY to your Paymob KSA dashboard secret key (starts with ' .
+                    '"sau_sk_test_" or "sau_sk_live_").',
+                    401,
+                );
+            }
+
+            return $secretKey;
+        }
+
+        $apiKey = (string) ($this->config['api_key'] ?? '');
+
+        if ($apiKey === '') {
+            throw new PaymobApiException(
+                'PAYMOB_API_KEY is empty. Set it to your Paymob (Egypt/Accept) dashboard API key, ' .
+                'or configure PAYMOB_SECRET_KEY + PAYMOB_BASE_URL for a KSA account instead.',
+                401,
+            );
         }
 
         $response = $this->request()->post('/auth/tokens', [
-            'api_key' => (string) ($this->config['api_key'] ?? ''),
+            'api_key' => $apiKey,
         ]);
 
         $body = $this->decode($response, 'authenticate');
