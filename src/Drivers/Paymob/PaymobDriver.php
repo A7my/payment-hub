@@ -185,15 +185,21 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
         ]));
         $this->dispatchEvent(new PaymentInitiated($request));
 
+        $step = 'authenticate';
+
         try {
             $authToken = $this->withRetry(fn () => $this->client->authenticate());
-            $order     = $this->withRetry(fn () => $this->client->createOrder($authToken, $amountCents, $currency, $request->idempotencyKey));
-            $orderId   = (int) ($order['id'] ?? 0);
 
+            $step  = 'createOrder';
+            $order = $this->withRetry(fn () => $this->client->createOrder($authToken, $amountCents, $currency, $request->idempotencyKey));
+            $orderId = (int) ($order['id'] ?? 0);
+
+            $step         = 'requestPaymentKey';
             $billingData  = $this->client->billingDataFrom($request->customer->name, $request->customer->email, $request->customer->phone);
             $paymentKeyResponse = $this->withRetry(fn () => $this->client->requestPaymentKey($authToken, $orderId, $amountCents, $currency, $billingData));
             $paymentKey   = (string) ($paymentKeyResponse['token'] ?? '');
 
+            $step     = 'payWithToken';
             $raw      = $this->withRetry(fn () => $this->client->payWithToken($paymentKey, (string) $request->token?->toString()));
             $response = $this->mapper->toPaymentResponse($raw);
 
@@ -214,11 +220,12 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
             return $response;
         } catch (Throwable $e) {
             $this->dispatchEvent(new PaymentFailed($request, null, $e));
-            $this->logError(ucfirst($operation) . ' failed', $this->buildLogContext($operation, [
+            $this->logError(ucfirst($operation) . " failed at step [{$step}]", $this->buildLogContext($operation, [
+                'step'  => $step,
                 'error' => $e->getMessage(),
             ]));
 
-            throw $this->exceptionMapper->map($e, ['operation' => $operation]);
+            throw $this->exceptionMapper->map($e, ['operation' => $operation, 'step' => $step]);
         }
     }
 
@@ -235,10 +242,14 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
             'reason'         => $request->reason,
         ]));
 
+        $step = 'authenticate';
+
         try {
             $authToken = $this->withRetry(fn () => $this->client->authenticate());
-            $raw       = $this->withRetry(fn () => $this->client->voidTransaction($authToken, $request->transactionId->toString()));
-            $response  = $this->mapper->toVoidResponse($raw);
+
+            $step = 'voidTransaction';
+            $raw  = $this->withRetry(fn () => $this->client->voidTransaction($authToken, $request->transactionId->toString()));
+            $response = $this->mapper->toVoidResponse($raw);
 
             $this->dispatchEvent(new PaymentVoided($request, $response));
             $this->logInfo('Void succeeded', $this->buildLogContext('void', [
@@ -248,9 +259,9 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
 
             return $response;
         } catch (Throwable $e) {
-            $this->logError('Void failed', $this->buildLogContext('void', ['error' => $e->getMessage()]));
+            $this->logError("Void failed at step [{$step}]", $this->buildLogContext('void', ['step' => $step, 'error' => $e->getMessage()]));
 
-            throw $this->exceptionMapper->map($e, ['operation' => 'void']);
+            throw $this->exceptionMapper->map($e, ['operation' => 'void', 'step' => $step]);
         }
     }
 
@@ -268,10 +279,14 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
             'amount'         => $request->amount->amount,
         ]));
 
+        $step = 'authenticate';
+
         try {
             $authToken = $this->withRetry(fn () => $this->client->authenticate());
-            $raw       = $this->withRetry(fn () => $this->client->captureTransaction($authToken, $request->transactionId->toString(), $request->amount->amount));
-            $response  = $this->mapper->toCaptureResponse($raw);
+
+            $step = 'captureTransaction';
+            $raw  = $this->withRetry(fn () => $this->client->captureTransaction($authToken, $request->transactionId->toString(), $request->amount->amount));
+            $response = $this->mapper->toCaptureResponse($raw);
 
             $this->dispatchEvent(new PaymentCaptured($request, $response));
             $this->logInfo('Capture succeeded', $this->buildLogContext('capture', [
@@ -281,9 +296,9 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
 
             return $response;
         } catch (Throwable $e) {
-            $this->logError('Capture failed', $this->buildLogContext('capture', ['error' => $e->getMessage()]));
+            $this->logError("Capture failed at step [{$step}]", $this->buildLogContext('capture', ['step' => $step, 'error' => $e->getMessage()]));
 
-            throw $this->exceptionMapper->map($e, ['operation' => 'capture']);
+            throw $this->exceptionMapper->map($e, ['operation' => 'capture', 'step' => $step]);
         }
     }
 
@@ -315,10 +330,14 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
             'reason'         => $request->reason,
         ]));
 
+        $step = 'authenticate';
+
         try {
             $authToken = $this->withRetry(fn () => $this->client->authenticate());
-            $raw       = $this->withRetry(fn () => $this->client->refundTransaction($authToken, $request->transactionId->toString(), $request->amount->amount));
-            $response  = $this->mapper->toRefundResponse($raw);
+
+            $step = 'refundTransaction';
+            $raw  = $this->withRetry(fn () => $this->client->refundTransaction($authToken, $request->transactionId->toString(), $request->amount->amount));
+            $response = $this->mapper->toRefundResponse($raw);
 
             $this->dispatchEvent(new PaymentRefunded($request, $response));
             $this->logInfo('Refund processed', $this->buildLogContext($operation, [
@@ -328,9 +347,9 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
 
             return $response;
         } catch (Throwable $e) {
-            $this->logError('Refund failed', $this->buildLogContext($operation, ['error' => $e->getMessage()]));
+            $this->logError("Refund failed at step [{$step}]", $this->buildLogContext($operation, ['step' => $step, 'error' => $e->getMessage()]));
 
-            throw $this->exceptionMapper->map($e, ['operation' => $operation]);
+            throw $this->exceptionMapper->map($e, ['operation' => $operation, 'step' => $step]);
         }
     }
 
@@ -348,10 +367,14 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
             'transaction_id' => $request->transactionId->toString(),
         ]));
 
+        $step = 'authenticate';
+
         try {
             $authToken = $this->withRetry(fn () => $this->client->authenticate());
-            $raw       = $this->withRetry(fn () => $this->client->retrieveTransaction($authToken, $request->transactionId->toString()));
-            $response  = $this->mapper->toVerificationResponse($raw);
+
+            $step = 'retrieveTransaction';
+            $raw  = $this->withRetry(fn () => $this->client->retrieveTransaction($authToken, $request->transactionId->toString()));
+            $response = $this->mapper->toVerificationResponse($raw);
 
             $this->logInfo('Verification completed', $this->buildLogContext('verify', [
                 'verified' => $response->isVerified(),
@@ -359,9 +382,9 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
 
             return $response;
         } catch (Throwable $e) {
-            $this->logError('Verification failed', $this->buildLogContext('verify', ['error' => $e->getMessage()]));
+            $this->logError("Verification failed at step [{$step}]", $this->buildLogContext('verify', ['step' => $step, 'error' => $e->getMessage()]));
 
-            throw $this->exceptionMapper->map($e, ['operation' => 'verify']);
+            throw $this->exceptionMapper->map($e, ['operation' => 'verify', 'step' => $step]);
         }
     }
 
@@ -377,10 +400,14 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
             'transaction_id' => $request->transactionId->toString(),
         ]));
 
+        $step = 'authenticate';
+
         try {
             $authToken = $this->withRetry(fn () => $this->client->authenticate());
-            $raw       = $this->withRetry(fn () => $this->client->retrieveTransaction($authToken, $request->transactionId->toString()));
-            $response  = $this->mapper->toStatusResponse($raw);
+
+            $step = 'retrieveTransaction';
+            $raw  = $this->withRetry(fn () => $this->client->retrieveTransaction($authToken, $request->transactionId->toString()));
+            $response = $this->mapper->toStatusResponse($raw);
 
             $this->dispatchEvent(new TransactionLookuped($request, $response));
             $this->logInfo('Lookup completed', $this->buildLogContext('lookup', [
@@ -389,9 +416,9 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
 
             return $response;
         } catch (Throwable $e) {
-            $this->logError('Lookup failed', $this->buildLogContext('lookup', ['error' => $e->getMessage()]));
+            $this->logError("Lookup failed at step [{$step}]", $this->buildLogContext('lookup', ['step' => $step, 'error' => $e->getMessage()]));
 
-            throw $this->exceptionMapper->map($e, ['operation' => 'lookup']);
+            throw $this->exceptionMapper->map($e, ['operation' => 'lookup', 'step' => $step]);
         }
     }
 
@@ -422,15 +449,21 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
         $amountCents = 100;
         $currency    = 'EGP';
 
+        $step = 'authenticate';
+
         try {
             $authToken = $this->withRetry(fn () => $this->client->authenticate());
-            $order     = $this->withRetry(fn () => $this->client->createOrder($authToken, $amountCents, $currency, $request->idempotencyKey));
-            $orderId   = (int) ($order['id'] ?? 0);
 
+            $step  = 'createOrder';
+            $order = $this->withRetry(fn () => $this->client->createOrder($authToken, $amountCents, $currency, $request->idempotencyKey));
+            $orderId = (int) ($order['id'] ?? 0);
+
+            $step               = 'requestPaymentKey';
             $billingData        = $this->client->billingDataFrom($name, $email, $phone);
             $paymentKeyResponse = $this->withRetry(fn () => $this->client->requestPaymentKey($authToken, $orderId, $amountCents, $currency, $billingData));
             $paymentKey         = (string) ($paymentKeyResponse['token'] ?? '');
 
+            $step     = 'payWithToken';
             $raw      = $this->withRetry(fn () => $this->client->payWithToken($paymentKey, $request->token->toString()));
             $response = $this->mapper->toPaymentResponse($raw);
 
@@ -448,9 +481,9 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
 
             return $response;
         } catch (Throwable $e) {
-            $this->logError('Save card failed', $this->buildLogContext('saveCard', ['error' => $e->getMessage()]));
+            $this->logError("Save card failed at step [{$step}]", $this->buildLogContext('saveCard', ['step' => $step, 'error' => $e->getMessage()]));
 
-            throw $this->exceptionMapper->map($e, ['operation' => 'saveCard']);
+            throw $this->exceptionMapper->map($e, ['operation' => 'saveCard', 'step' => $step]);
         }
     }
 
@@ -472,15 +505,21 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
             'currency' => $request->currency->value,
         ]));
 
+        $step = 'authenticate';
+
         try {
             $authToken = $this->withRetry(fn () => $this->client->authenticate());
-            $order     = $this->withRetry(fn () => $this->client->createOrder($authToken, $request->amount->amount, $request->currency->value, $request->idempotencyKey));
-            $orderId   = (int) ($order['id'] ?? 0);
 
+            $step  = 'createOrder';
+            $order = $this->withRetry(fn () => $this->client->createOrder($authToken, $request->amount->amount, $request->currency->value, $request->idempotencyKey));
+            $orderId = (int) ($order['id'] ?? 0);
+
+            $step               = 'requestPaymentKey';
             $billingData        = $this->client->billingDataFrom($request->customer->name, $request->customer->email, $request->customer->phone);
             $paymentKeyResponse = $this->withRetry(fn () => $this->client->requestPaymentKey($authToken, $orderId, $request->amount->amount, $request->currency->value, $billingData));
             $paymentKey         = (string) ($paymentKeyResponse['token'] ?? '');
 
+            $step     = 'payWithToken';
             $raw      = $this->withRetry(fn () => $this->client->payWithToken($paymentKey, $request->token->toString()));
             $response = $this->mapper->toPaymentResponse($raw);
 
@@ -499,9 +538,9 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
 
             return $response;
         } catch (Throwable $e) {
-            $this->logError('Token charge failed', $this->buildLogContext('chargeToken', ['error' => $e->getMessage()]));
+            $this->logError("Token charge failed at step [{$step}]", $this->buildLogContext('chargeToken', ['step' => $step, 'error' => $e->getMessage()]));
 
-            throw $this->exceptionMapper->map($e, ['operation' => 'chargeToken']);
+            throw $this->exceptionMapper->map($e, ['operation' => 'chargeToken', 'step' => $step]);
         }
     }
 
@@ -530,11 +569,16 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
         $email = $request->customer?->email ?? 'guest@example.invalid';
         $phone = $request->customer?->phone;
 
+        $step = 'authenticate';
+
         try {
             $authToken = $this->withRetry(fn () => $this->client->authenticate());
-            $order     = $this->withRetry(fn () => $this->client->createOrder($authToken, $request->amount->amount, $request->currency->value, $request->idempotencyKey));
-            $orderId   = (int) ($order['id'] ?? 0);
 
+            $step  = 'createOrder';
+            $order = $this->withRetry(fn () => $this->client->createOrder($authToken, $request->amount->amount, $request->currency->value, $request->idempotencyKey));
+            $orderId = (int) ($order['id'] ?? 0);
+
+            $step               = 'requestPaymentKey';
             $billingData        = $this->client->billingDataFrom($name, $email, $phone);
             $paymentKeyResponse = $this->withRetry(fn () => $this->client->requestPaymentKey($authToken, $orderId, $request->amount->amount, $request->currency->value, $billingData));
             $paymentKey         = (string) ($paymentKeyResponse['token'] ?? '');
@@ -549,9 +593,9 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
 
             return $response;
         } catch (Throwable $e) {
-            $this->logError('Payment link creation failed', $this->buildLogContext('createPaymentLink', ['error' => $e->getMessage()]));
+            $this->logError("Payment link creation failed at step [{$step}]", $this->buildLogContext('createPaymentLink', ['step' => $step, 'error' => $e->getMessage()]));
 
-            throw $this->exceptionMapper->map($e, ['operation' => 'createPaymentLink']);
+            throw $this->exceptionMapper->map($e, ['operation' => 'createPaymentLink', 'step' => $step]);
         }
     }
 
