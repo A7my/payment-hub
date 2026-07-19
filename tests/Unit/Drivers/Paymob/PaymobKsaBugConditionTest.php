@@ -21,9 +21,9 @@ use PHPUnit\Framework\TestCase;
  *
  * Expected (fixed) behavior for all such configs:
  *   - authenticate() returns secret_key WITHOUT calling POST /auth/tokens
- *   - Every outgoing HTTP request carries Authorization: Token <secret_key>
- *     (scheme corrected from Bearer after a live 401 — see
- *     test_ksa_requests_carry_authorization_token_header()'s own docblock)
+ *   - Every outgoing HTTP request carries Authorization: Bearer <secret_key>
+ *     (see test_ksa_requests_carry_authorization_bearer_header()'s own
+ *     docblock for the history of this scheme being briefly misidentified)
  *   - auth_token is absent from all request bodies
  *
  * Run on UNFIXED code → FAILS (proves bug exists).
@@ -139,23 +139,22 @@ final class PaymobKsaBugConditionTest extends TestCase
 
     /**
      * **Property 1: Bug Condition** — every outgoing request must carry
-     * Authorization: Token <secret_key> in KSA mode.
+     * Authorization: Bearer <secret_key> in KSA mode.
      *
-     * Scheme corrected from `Bearer` to `Token` after a live call against
-     * Paymob's real KSA API returned HTTP 401 with the message
-     * "Authentication credentials were not provided." — the exact stock
-     * error Django REST Framework's `TokenAuthentication` returns when no
-     * credentials are found in a scheme it recognises (DRF's
-     * `TokenAuthentication` expects `Token`, not `Bearer`). See
+     * The scheme was briefly changed to `Token` after an earlier live 401
+     * ("Authentication credentials were not provided.") suggested a
+     * Django-REST-Framework-style `TokenAuthentication` scheme — that guess
+     * was superseded once the driver was rewritten against Paymob's actual
+     * KSA Intention API (see
      * {@see \Mifatoyeh\LaravelPaymentFramework\Drivers\Paymob\PaymobClient::request()}'s
-     * own docblock for the same note.
+     * own docblock), which confirmed `Bearer` is correct for that API.
      *
      * EXPECTED OUTCOME on unfixed code: FAILS.
      * Counterexample: no Authorization header is set for KSA configs.
      *
      * @dataProvider ksaConfigProvider
      */
-    public function test_ksa_requests_carry_authorization_token_header(array $config): void
+    public function test_ksa_requests_carry_authorization_bearer_header(array $config): void
     {
         $http = new HttpFactory();
         $http->fake([
@@ -166,7 +165,7 @@ final class PaymobKsaBugConditionTest extends TestCase
         $client = new PaymobClient($config, $http);
         $client->createOrder('__any_token__', 1000, 'SAR', 'ord-1');
 
-        $expectedHeader = 'Token ' . $config['secret_key'];
+        $expectedHeader = 'Bearer ' . $config['secret_key'];
 
         $http->assertSent(function ($request) use ($expectedHeader, $config) {
             $authHeader = $request->header('Authorization')[0] ?? '';

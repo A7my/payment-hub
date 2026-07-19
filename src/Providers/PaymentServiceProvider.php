@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Mifatoyeh\LaravelPaymentFramework\Providers;
 
 use Illuminate\Support\ServiceProvider;
+use Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutService;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Currency\CurrencyConverterContract;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Logging\PaymentLoggerContract;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Repositories\PaymentTransactionRepositoryContract;
@@ -17,7 +18,6 @@ use Mifatoyeh\LaravelPaymentFramework\Repositories\NullPaymentTransactionReposit
 use Mifatoyeh\LaravelPaymentFramework\Services\PaymentService;
 use Mifatoyeh\LaravelPaymentFramework\Services\RetryService;
 use Mifatoyeh\LaravelPaymentFramework\Services\WebhookVerifier;
-use Mifatoyeh\LaravelPaymentFramework\Webhooks\WebhookController;
 use Mifatoyeh\LaravelPaymentFramework\Webhooks\WebhookProcessor;
 
 /**
@@ -99,12 +99,18 @@ class PaymentServiceProvider extends ServiceProvider
         $this->app->bind(PaymentService::class, function ($app) {
             return new PaymentService($app->make(PaymentManager::class));
         });
+
+        // Bind CheckoutService — orchestrates the generic checkout endpoint
+        $this->app->bind(CheckoutService::class, function ($app) {
+            return new CheckoutService($app->make(PaymentManager::class));
+        });
     }
 
     /**
      * Bootstrap the package after all service providers have been registered.
      *
      * - Registers the webhook route if payment.webhook.enabled is true.
+     * - Registers the checkout route if payment.checkout.enabled is true.
      * - Registers a PaymentSucceeded listener for repository persistence.
      * - Publishes config and migration assets for vendor:publish.
      */
@@ -113,14 +119,20 @@ class PaymentServiceProvider extends ServiceProvider
         // Validate configuration at boot time
         // TODO: $this->validateConfiguration();
 
-        // Register webhook route if enabled
-        // TODO: if (config('payment.webhook.enabled', true)) {
-        //           $prefix = config('payment.webhook.prefix', 'payment/webhook');
-        //           $middleware = config('payment.webhook.middleware', ['api']);
-        //           \Illuminate\Support\Facades\Route::middleware($middleware)
-        //               ->post("{$prefix}/{driver}", [WebhookController::class, 'handle'])
-        //               ->name('payment.webhook');
-        //       }
+        // Register the webhook route — POST {prefix}/{driver}. The route
+        // file reads its own prefix/middleware from config; nothing beyond
+        // the enabled flag is decided here, keeping this symmetric with the
+        // checkout route below.
+        if (config('payment.webhook.enabled', true)) {
+            $this->loadRoutesFrom(__DIR__ . '/../../routes/webhooks.php');
+        }
+
+        // Register the generic checkout route — POST {route}. Same
+        // loadRoutesFrom() pattern as webhooks above; the route file reads
+        // its own path/middleware from config.
+        if (config('payment.checkout.enabled', true)) {
+            $this->loadRoutesFrom(__DIR__ . '/../../routes/checkout.php');
+        }
 
         // Register PaymentSucceeded listener for optional repository persistence
         // TODO: if (config('payment.repository.enabled', false)) {

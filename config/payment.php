@@ -177,6 +177,43 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Payable Models
+    |--------------------------------------------------------------------------
+    |
+    | Maps the short `model_type` string a checkout request sends to the
+    | actual Eloquent model class it refers to. This is a fixed, developer-
+    | controlled allowlist — model_type is NEVER resolved directly to a class
+    | string from request input; only keys registered here are reachable.
+    | Every mapped class must implement
+    | \Mifatoyeh\LaravelPaymentFramework\Contracts\Payable.
+    |
+    | Example:
+    |   'order' => \App\Models\Order::class,
+    |
+    */
+    'payables' => [
+
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Generic Checkout Endpoint
+    |--------------------------------------------------------------------------
+    |
+    | A single, package-owned endpoint that starts a payment for any
+    | registered Payable model, without the host application needing its own
+    | route/controller. Set enabled to false to disable auto-registration
+    | (e.g. to register the route yourself with different middleware).
+    |
+    */
+    'checkout' => [
+        'enabled'    => env('PAYMENT_CHECKOUT_ENABLED', true),
+        'route'      => env('PAYMENT_CHECKOUT_ROUTE', 'payment/checkout'),
+        'middleware' => ['web', 'auth'],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Transaction Repository
     |--------------------------------------------------------------------------
     |

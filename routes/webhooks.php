@@ -14,12 +14,15 @@ use Mifatoyeh\LaravelPaymentFramework\Webhooks\WebhookController;
  * The {driver} path parameter routes the webhook to the correct driver
  * without requiring separate routes per provider.
  *
- * The route prefix is configurable via payment.webhook.prefix.
- * Disable auto-registration by setting payment.webhook.enabled to false.
+ * The route prefix and middleware are configurable via payment.webhook.prefix
+ * and payment.webhook.middleware. Disable auto-registration by setting
+ * payment.webhook.enabled to false.
  *
  * This file is loaded by PaymentServiceProvider::boot() when enabled.
  */
-Route::post(
-    config('payment.webhook.prefix', 'payment/webhook') . '/{driver}',
-    [WebhookController::class, 'handle']
-)->name('payment.webhook');
+Route::middleware(config('payment.webhook.middleware', ['api']))
+    ->post(
+        config('payment.webhook.prefix', 'payment/webhook') . '/{driver}',
+        [WebhookController::class, 'handle']
+    )
+    ->name('payment.webhook');
