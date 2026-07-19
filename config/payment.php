@@ -210,6 +210,14 @@ return [
         'enabled'    => env('PAYMENT_CHECKOUT_ENABLED', true),
         'route'      => env('PAYMENT_CHECKOUT_ROUTE', 'payment/checkout'),
         'middleware' => ['web', 'auth'],
+
+        // When true, CheckoutService::confirm() persists a checkout_transactions
+        // row for every authoritatively-verified payment. Requires the migration:
+        //   php artisan vendor:publish --tag=payment-migrations
+        //   php artisan migrate
+        // Set to false if you haven't run that migration yet, or you handle
+        // your own persistence via HasPaymentCallback/CheckoutPaymentConfirmed.
+        'persist_transactions' => env('PAYMENT_CHECKOUT_PERSIST_TRANSACTIONS', true),
     ],
 
     /*

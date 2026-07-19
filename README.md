@@ -365,14 +365,15 @@ POST /payment/checkout
 - **`model_type`** — the key you used in `payment.payables` (`"order"` above), not a class name.
 - **`model_id`** — the record's primary key.
 - **`driver`** — `"stripe"`, `"paymob"`, etc. — must also be in that model's own `getSupportedPaymentDrivers()`.
-- **`driver_type`** — `"webview"` (works today — redirects to a hosted checkout page, same as `createPaymentLink()`) or `"sdk"` (**not implemented yet** — returns a clear 422, not a silent wrong response; see [Status](#status)).
-- **`return_url`/`cancel_url`** — forwarded straight through to the driver's `createPaymentLink()`.
+- **`driver_type`** — `"webview"` (redirects to a hosted checkout page, same as `createPaymentLink()`) or `"sdk"` (returns a client-confirmable reference for a native/client-side SDK instead — a driver that doesn't support it yet returns a clear 422, not a silent wrong response). See [`CHECKOUT.md`](CHECKOUT.md) for the full sdk-mode walkthrough, the required `POST {route}/confirm` step, per-model payment callbacks, and transaction persistence — none of that is duplicated here.
+- **`return_url`/`cancel_url`** — forwarded straight through to the driver's `createPaymentLink()` (webview mode only).
 
-Success response (HTTP 200):
+Success response (HTTP 200, webview mode):
 
 ```json
 {
   "status": "success",
+  "driver_type": "webview",
   "checkout_url": "https://checkout.stripe.com/c/pay/...",
   "link_id": "cs_test_...",
   "expires_at": null,
@@ -384,8 +385,14 @@ Redirect the browser (or open a webview) to `checkout_url`. Failure responses
 always look like `{"status": "fail", "message": "..."}`, with the HTTP status
 telling you what kind of failure it was: `404` (no such record), `422`
 (unknown `model_type`, driver not allowed for this model, invalid
-`driver_type`), `403` (`authorizePayment()` returned false), `502` (the
-provider API itself failed).
+`driver_type`, or a driver that doesn't support the requested `driver_type`),
+`403` (`authorizePayment()` returned false), `502` (the provider API itself
+failed).
+
+Whichever `driver_type` you use, `createPaymentLink()`/`createSdkIntent()`
+alone never confirms a payment happened — see
+[`CHECKOUT.md`](CHECKOUT.md) for why `POST {route}/confirm` is a required
+second step, not an optional extra.
 
 ### Route configuration
 
@@ -420,12 +427,12 @@ resulting response.
 This package is under active development. Driver method support, per
 provider:
 
-| Driver     | charge / authorize / void / capture / refund | verify / lookup | saveCard / chargeToken | subscriptions | createPaymentLink | webhooks              |
-| ---------- | ---------------------------------------------- | ---------------- | ------------------------ | -------------- | ------------------ | ---------------------- |
-| Stripe     | ✅                                               | ✅                | ✅                        | ✅              | ✅                  | 🚧                      |
-| Paymob     | ✅                                               | ✅                | ✅                        | 🚫              | ✅                  | 🚧                      |
-| PayPal     | —                                                | —                 | —                         | —              | —                   | planned, not started   |
-| MyFatoorah | —                                                | —                 | —                         | —              | —                   | planned, not started   |
+| Driver     | charge / authorize / void / capture / refund | verify / lookup | saveCard / chargeToken | subscriptions | createPaymentLink | sdk checkout | webhooks              |
+| ---------- | ---------------------------------------------- | ---------------- | ------------------------ | -------------- | ------------------ | ------------- | ---------------------- |
+| Stripe     | ✅                                               | ✅                | ✅                        | ✅              | ✅                  | ✅             | 🚧                      |
+| Paymob     | ✅                                               | ✅                | ✅                        | 🚫              | ✅                  | ✅             | 🚧                      |
+| PayPal     | —                                                | —                 | —                         | —              | —                   | —             | planned, not started   |
+| MyFatoorah | —                                                | —                 | —                         | —              | —                   | —             | planned, not started   |
 
 ✅ implemented and tested · 🚧 not yet implemented (throws until it is) · 🚫 not supported by this provider (throws `UnsupportedOperationException`)
 

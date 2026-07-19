@@ -11,6 +11,7 @@ use Mifatoyeh\LaravelPaymentFramework\Responses\CaptureResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\PaymentLinkResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\PaymentResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\RefundResponse;
+use Mifatoyeh\LaravelPaymentFramework\Responses\SdkCheckoutResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\StatusResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\SubscriptionResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\VerificationResponse;
@@ -751,6 +752,37 @@ final class StripeMapper
             linkId: (string) ($raw['id'] ?? ''),
             expiresAt: $expiresAt,
             message: 'Payment link created.',
+            rawResponse: $raw,
+        );
+    }
+
+    /**
+     * Map a raw, UNCONFIRMED Stripe PaymentIntent payload to an
+     * SdkCheckoutResponse, for createSdkIntent() (`driver_type: sdk`).
+     *
+     * `$publishableKey` is passed in explicitly rather than read from
+     * config here — this mapper class has no config dependency by design
+     * (translation only, matching every other method in this class); the
+     * driver already holds the config and passes the value through.
+     *
+     * `successful` reflects only whether Stripe returned a usable
+     * `client_secret` — it says nothing about whether the customer has
+     * paid, since confirmation happens later, client-side.
+     *
+     * @param array<string, mixed> $raw The raw Stripe PaymentIntent payload.
+     */
+    public function toSdkCheckoutResponse(array $raw, ?string $publishableKey): SdkCheckoutResponse
+    {
+        $clientSecret = (string) ($raw['client_secret'] ?? '');
+
+        return new SdkCheckoutResponse(
+            successful: $clientSecret !== '',
+            transactionReference: (string) ($raw['id'] ?? ''),
+            clientSecret: $clientSecret,
+            publishableKey: $publishableKey,
+            message: $clientSecret !== ''
+                ? 'Payment intent created — confirm client-side using the client secret.'
+                : 'Payment intent creation did not return a client secret.',
             rawResponse: $raw,
         );
     }

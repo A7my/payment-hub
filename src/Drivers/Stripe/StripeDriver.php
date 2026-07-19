@@ -6,6 +6,7 @@ namespace Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe;
 
 use Illuminate\Contracts\Events\Dispatcher;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\PaymentDriverContract;
+use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\SupportsSdkCheckout;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Logging\PaymentLoggerContract;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Services\RetryServiceContract;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CancelSubscriptionRequest;
@@ -36,6 +37,7 @@ use Mifatoyeh\LaravelPaymentFramework\Responses\CaptureResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\PaymentLinkResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\PaymentResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\RefundResponse;
+use Mifatoyeh\LaravelPaymentFramework\Responses\SdkCheckoutResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\StatusResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\SubscriptionResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\VerificationResponse;
@@ -82,7 +84,7 @@ use Throwable;
  * are fully implemented. Every other method body is intentionally left as a
  * `// TODO` stub, to be implemented in a later task.
  */
-final class StripeDriver extends AbstractDriver implements PaymentDriverContract
+final class StripeDriver extends AbstractDriver implements PaymentDriverContract, SupportsSdkCheckout
 {
     private readonly StripeClient $client;
 
@@ -579,6 +581,52 @@ final class StripeDriver extends AbstractDriver implements PaymentDriverContract
             ]));
 
             throw $this->exceptionMapper->map($e, ['operation' => 'createPaymentLink']);
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * Creates an UNCONFIRMED Stripe PaymentIntent (see
+     * {@see StripeClient::createUnconfirmedPaymentIntent()}'s own docblock
+     * for how this differs from {@see self::createPaymentLink()}/
+     * {@see self::charge()}) and returns its `client_secret` for a native
+     * Stripe SDK (mobile or web) to confirm directly, client-side. No
+     * `returnUrl` guard here — unlike the hosted Checkout Session flow,
+     * confirming a PaymentIntent client-side has no redirect concept to
+     * require a `success_url` for.
+     *
+     * No {@see CardException} branch — verified against the SDK that
+     * creating an unconfirmed PaymentIntent never touches a card network at
+     * all (nothing is confirmed yet). No event is dispatched — the
+     * meaningful confirmation moment is `CheckoutService::confirm()`, which
+     * dispatches {@see \Mifatoyeh\LaravelPaymentFramework\Events\CheckoutPaymentConfirmed}
+     * once the client-side confirmation has actually happened; dispatching
+     * something here, before any card was even entered, would be premature.
+     */
+    public function createSdkIntent(PaymentLinkRequest $request): SdkCheckoutResponse
+    {
+        $this->validateIdempotencyKey($request->idempotencyKey);
+        $this->logInfo('Creating SDK checkout intent', $this->buildLogContext('createSdkIntent', [
+            'amount'   => $request->amount->amount,
+            'currency' => $request->currency->value,
+        ]));
+
+        try {
+            $raw      = $this->withRetry(fn () => $this->client->createUnconfirmedPaymentIntent($request));
+            $response = $this->mapper->toSdkCheckoutResponse($raw, $this->getCredential('key'));
+
+            $this->logInfo('SDK checkout intent created', $this->buildLogContext('createSdkIntent', [
+                'transaction_reference' => $response->getTransactionReference(),
+            ]));
+
+            return $response;
+        } catch (Throwable $e) {
+            $this->logError('SDK checkout intent creation failed', $this->buildLogContext('createSdkIntent', [
+                'error' => $e->getMessage(),
+            ]));
+
+            throw $this->exceptionMapper->map($e, ['operation' => 'createSdkIntent']);
         }
     }
 

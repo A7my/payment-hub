@@ -9,6 +9,7 @@ use Illuminate\Http\Client\Factory as HttpFactory;
 use InvalidArgumentException;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CancelSubscriptionRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CaptureRequest;
+use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\SupportsSdkCheckout;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CustomerData;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentLinkRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentRequest;
@@ -83,6 +84,21 @@ final class PaymobDriverTest extends TestCase
             $this->events,
             new RetryService(1, 0, true),
             ['api_key' => 'test-key', 'integration_id' => 12345, 'iframe_id' => '999'],
+        );
+    }
+
+    private function makeKsaDriver(): PaymobDriver
+    {
+        return new PaymobDriver(
+            new NullLogger(),
+            $this->events,
+            new RetryService(1, 0, true),
+            [
+                'secret_key'     => 'sau_sk_test_001',
+                'public_key'     => 'sau_pk_test_001',
+                'integration_id' => 12345,
+                'base_url'       => 'https://ksa.paymob.com/api',
+            ],
         );
     }
 
@@ -409,6 +425,69 @@ final class PaymobDriverTest extends TestCase
             $response->getPaymentUrl(),
         );
         $this->assertInstanceOf(PaymentLinkCreated::class, $this->events->dispatched[0]);
+    }
+
+    // =========================================================================
+    // createSdkIntent()
+    // =========================================================================
+
+    /** @test */
+    public function test_driver_implements_supports_sdk_checkout(): void
+    {
+        $this->assertInstanceOf(SupportsSdkCheckout::class, $this->makeDriver());
+    }
+
+    /** @test */
+    public function test_create_sdk_intent_returns_the_payment_key_as_client_secret_in_egypt_mode(): void
+    {
+        $this->fakeHttp([
+            '*/auth/tokens'              => [['token' => 'auth_1'], 200],
+            '*/ecommerce/orders'         => [['id' => 555], 200],
+            '*/acceptance/payment_keys'  => [['token' => 'pk_1'], 200],
+        ]);
+
+        $response = $this->makeDriver()->createSdkIntent(new PaymentLinkRequest(
+            amount: Money::ofMinor(10000, Currency::EGP),
+            currency: Currency::EGP,
+            description: 'Sandbox test payment',
+            customer: new CustomerData('Mohamed Azmy', 'azmy@example.com'),
+            returnUrl: null,
+            cancelUrl: null,
+            expiresAt: null,
+            idempotencyKey: 'idem-sdk-001',
+        ));
+
+        $this->assertTrue($response->isSuccessful());
+        $this->assertSame('pk_1', $response->getClientSecret());
+        $this->assertSame('555', $response->getTransactionReference());
+        $this->assertNull($response->getPublishableKey());
+    }
+
+    /** @test */
+    public function test_create_sdk_intent_returns_the_intention_client_secret_in_ksa_mode(): void
+    {
+        $this->fakeHttp([
+            '*/v1/intention/' => [
+                ['client_secret' => 'sau_csk_test_001', 'intention_order_id' => 777],
+                200,
+            ],
+        ]);
+
+        $response = $this->makeKsaDriver()->createSdkIntent(new PaymentLinkRequest(
+            amount: Money::ofMinor(10000, Currency::SAR),
+            currency: Currency::SAR,
+            description: 'Sandbox test payment',
+            customer: new CustomerData('Mohamed Azmy', 'azmy@example.com'),
+            returnUrl: null,
+            cancelUrl: null,
+            expiresAt: null,
+            idempotencyKey: 'idem-sdk-ksa-001',
+        ));
+
+        $this->assertTrue($response->isSuccessful());
+        $this->assertSame('sau_csk_test_001', $response->getClientSecret());
+        $this->assertSame('777', $response->getTransactionReference());
+        $this->assertSame('sau_pk_test_001', $response->getPublishableKey());
     }
 
     // =========================================================================

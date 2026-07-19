@@ -8,6 +8,7 @@ use Illuminate\Contracts\Events\Dispatcher;
 use InvalidArgumentException;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\PaymentDriverContract;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\SupportsCapabilities;
+use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\SupportsSdkCheckout;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Logging\PaymentLoggerContract;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Services\RetryServiceContract;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CancelSubscriptionRequest;
@@ -37,6 +38,7 @@ use Mifatoyeh\LaravelPaymentFramework\Responses\CaptureResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\PaymentLinkResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\PaymentResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\RefundResponse;
+use Mifatoyeh\LaravelPaymentFramework\Responses\SdkCheckoutResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\StatusResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\SubscriptionResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\VerificationResponse;
@@ -93,7 +95,7 @@ use Throwable;
  * fake one. `processWebhook()`/`verifyWebhookSignature()` are `// TODO`
  * stubs, deferred per explicit instruction (same status as Stripe's).
  */
-final class PaymobDriver extends AbstractDriver implements PaymentDriverContract, SupportsCapabilities
+final class PaymobDriver extends AbstractDriver implements PaymentDriverContract, SupportsCapabilities, SupportsSdkCheckout
 {
     private readonly PaymobClient $client;
 
@@ -565,42 +567,16 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
             'currency' => $request->currency->value,
         ]));
 
-        $name  = $request->customer?->name ?? 'NA Customer';
-        $email = $request->customer?->email ?? 'guest@example.invalid';
-        $phone = $request->customer?->phone;
-
-        $step        = 'init';
-        $billingData = $this->client->billingDataFrom($name, $email, $phone);
+        $step = 'init';
 
         try {
-            if ($this->client->isKsaMode()) {
-                // KSA: single Intention API call → hosted unified checkout URL
-                $step      = 'createIntention';
-                $intention = $this->withRetry(fn () => $this->client->createIntention(
-                    $request->amount->amount,
-                    $request->currency->value,
-                    $billingData,
-                    $request->idempotencyKey,
-                ));
-                $clientSecret = (string) ($intention['client_secret'] ?? '');
-                $url          = $this->client->buildKsaCheckoutUrl($clientSecret);
-                $response     = $this->mapper->toPaymentLinkResponse($url, $intention);
-            } else {
-                // Egypt: authenticate → createOrder → requestPaymentKey → iframe
-                $step      = 'authenticate';
-                $authToken = $this->withRetry(fn () => $this->client->authenticate());
+            $ref = $this->createCheckoutReference($request, $step);
 
-                $step    = 'createOrder';
-                $order   = $this->withRetry(fn () => $this->client->createOrder($authToken, $request->amount->amount, $request->currency->value, $request->idempotencyKey));
-                $orderId = (int) ($order['id'] ?? 0);
+            $url = $this->client->isKsaMode()
+                ? $this->client->buildKsaCheckoutUrl($ref['secret'])
+                : $this->client->buildIframeUrl($ref['secret']);
 
-                $step               = 'requestPaymentKey';
-                $paymentKeyResponse = $this->withRetry(fn () => $this->client->requestPaymentKey($authToken, $orderId, $request->amount->amount, $request->currency->value, $billingData));
-                $paymentKey         = (string) ($paymentKeyResponse['token'] ?? '');
-
-                $url      = $this->client->buildIframeUrl($paymentKey);
-                $response = $this->mapper->toPaymentLinkResponse($url, $order);
-            }
+            $response = $this->mapper->toPaymentLinkResponse($url, $ref['raw']);
 
             $this->dispatchEvent(new PaymentLinkCreated($request, $response));
             $this->logInfo('Payment link created', $this->buildLogContext('createPaymentLink', [
@@ -613,6 +589,126 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
 
             throw $this->exceptionMapper->map($e, ['operation' => 'createPaymentLink', 'step' => $step]);
         }
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * Native-SDK counterpart to {@see self::createPaymentLink()} — both need
+     * the exact same Paymob order/intention created (see
+     * {@see self::createCheckoutReference()}), and differ only in what they
+     * do with the resulting secret: `createPaymentLink()` turns it into a
+     * hosted redirect URL; this method hands it back raw so a client-side
+     * SDK (Paymob's unified checkout JS/mobile SDK) can confirm the charge
+     * itself. No raw card data passes through this method or this package's
+     * server at any point — matching this class's own docblock's "one
+     * deliberate, load-bearing design decision".
+     *
+     * KSA mode returns the Intention API's `client_secret` (`sau_csk_...`)
+     * directly — this is the exact value Paymob's unified-checkout SDK
+     * expects. Egypt/Accept mode returns the `payment_key` token from
+     * {@see PaymobClient::requestPaymentKey()} — the same token
+     * {@see self::createPaymentLink()} already turns into an iframe URL,
+     * usable by Paymob's iframe/mobile SDKs to confirm client-side.
+     *
+     * No event is dispatched here — same reasoning as
+     * {@see \Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe\StripeDriver::createSdkIntent()}:
+     * creating an intent never itself charges anything; the actual outcome
+     * is confirmed later via `CheckoutService::confirm()`'s authoritative
+     * `lookup()` call.
+     */
+    public function createSdkIntent(PaymentLinkRequest $request): SdkCheckoutResponse
+    {
+        $this->validateIdempotencyKey($request->idempotencyKey);
+        $this->logInfo('Creating SDK checkout intent', $this->buildLogContext('createSdkIntent', [
+            'amount'   => $request->amount->amount,
+            'currency' => $request->currency->value,
+        ]));
+
+        $step = 'init';
+
+        try {
+            $ref = $this->createCheckoutReference($request, $step);
+
+            $response = new SdkCheckoutResponse(
+                successful: $ref['secret'] !== '',
+                transactionReference: $ref['reference'],
+                clientSecret: $ref['secret'],
+                publishableKey: $this->client->publicKey(),
+                message: $ref['secret'] !== '' ? 'SDK checkout intent created.' : 'Paymob did not return a client-usable secret.',
+                rawResponse: $ref['raw'],
+            );
+
+            $this->logInfo('SDK checkout intent created', $this->buildLogContext('createSdkIntent', [
+                'transaction_reference' => $response->getTransactionReference(),
+            ]));
+
+            return $response;
+        } catch (Throwable $e) {
+            $this->logError("SDK checkout intent creation failed at step [{$step}]", $this->buildLogContext('createSdkIntent', ['step' => $step, 'error' => $e->getMessage()]));
+
+            throw $this->exceptionMapper->map($e, ['operation' => 'createSdkIntent', 'step' => $step]);
+        }
+    }
+
+    /**
+     * Shared order/intention creation for {@see self::createPaymentLink()}
+     * and {@see self::createSdkIntent()} — both need the identical Paymob
+     * order (Egypt) or Intention (KSA) created; only the caller decides what
+     * to do with the resulting secret. Extracted specifically to avoid the
+     * two methods drifting apart on the underlying Paymob call sequence.
+     *
+     * `$step` is passed by reference so the caller's own try/catch block
+     * (which logs/maps exceptions using `$step`) reflects exactly which
+     * Paymob call failed, same as every other multi-call method in this
+     * driver.
+     *
+     * @param string $step Caller's step-tracking variable, updated in place.
+     *
+     * @return array{secret: string, reference: string, raw: array<string, mixed>}
+     */
+    private function createCheckoutReference(PaymentLinkRequest $request, string &$step): array
+    {
+        $name  = $request->customer?->name ?? 'NA Customer';
+        $email = $request->customer?->email ?? 'guest@example.invalid';
+        $phone = $request->customer?->phone;
+
+        $billingData = $this->client->billingDataFrom($name, $email, $phone);
+
+        if ($this->client->isKsaMode()) {
+            // KSA: single Intention API call → client_secret
+            $step      = 'createIntention';
+            $intention = $this->withRetry(fn () => $this->client->createIntention(
+                $request->amount->amount,
+                $request->currency->value,
+                $billingData,
+                $request->idempotencyKey,
+            ));
+
+            return [
+                'secret'    => (string) ($intention['client_secret'] ?? ''),
+                'reference' => (string) ($intention['intention_order_id'] ?? ($intention['id'] ?? '')),
+                'raw'       => $intention,
+            ];
+        }
+
+        // Egypt: authenticate → createOrder → requestPaymentKey
+        $step      = 'authenticate';
+        $authToken = $this->withRetry(fn () => $this->client->authenticate());
+
+        $step    = 'createOrder';
+        $order   = $this->withRetry(fn () => $this->client->createOrder($authToken, $request->amount->amount, $request->currency->value, $request->idempotencyKey));
+        $orderId = (int) ($order['id'] ?? 0);
+
+        $step               = 'requestPaymentKey';
+        $paymentKeyResponse = $this->withRetry(fn () => $this->client->requestPaymentKey($authToken, $orderId, $request->amount->amount, $request->currency->value, $billingData));
+        $paymentKey         = (string) ($paymentKeyResponse['token'] ?? '');
+
+        return [
+            'secret'    => $paymentKey,
+            'reference' => (string) $orderId,
+            'raw'       => $order,
+        ];
     }
 
     /**

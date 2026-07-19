@@ -102,7 +102,10 @@ class PaymentServiceProvider extends ServiceProvider
 
         // Bind CheckoutService — orchestrates the generic checkout endpoint
         $this->app->bind(CheckoutService::class, function ($app) {
-            return new CheckoutService($app->make(PaymentManager::class));
+            return new CheckoutService(
+                $app->make(PaymentManager::class),
+                $app->make(\Illuminate\Contracts\Events\Dispatcher::class),
+            );
         });
     }
 

@@ -144,4 +144,20 @@ final class PaymentDriverProxy implements PaymentDriverContract
     {
         return $this->driver->verifyWebhookSignature($request);
     }
+
+    /**
+     * Return the real, wrapped driver instance.
+     *
+     * For code that needs to check an OPTIONAL capability interface not
+     * part of {@see PaymentDriverContract} (e.g.
+     * {@see \Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\SupportsSdkCheckout}) —
+     * this proxy only implements the 15 contract methods, so `$proxy
+     * instanceof SupportsSdkCheckout` is always false even when the
+     * underlying driver does implement it. Unwrap first:
+     * `$manager->driver('stripe')->getWrappedDriver() instanceof SupportsSdkCheckout`.
+     */
+    public function getWrappedDriver(): PaymentDriverContract
+    {
+        return $this->driver;
+    }
 }

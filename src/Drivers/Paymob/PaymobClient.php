@@ -407,6 +407,21 @@ final class PaymobClient
     }
 
     /**
+     * The configured Paymob public key, if any — used by
+     * {@see self::buildKsaCheckoutUrl()} (KSA hosted checkout URL) and by
+     * {@see PaymobDriver::createSdkIntent()} (returned to the caller so a
+     * native/unified-checkout SDK can initialise with it). Egypt/Accept
+     * integrations do not always configure one, so this is nullable rather
+     * than falling back to an empty string.
+     */
+    public function publicKey(): ?string
+    {
+        $value = $this->config['public_key'] ?? null;
+
+        return is_string($value) && $value !== '' ? $value : null;
+    }
+
+    /**
      * Build a Paymob billing_data array, filling gaps with "NA" — verified
      * only in the sense that Paymob is documented (per general knowledge)
      * to accept literal "NA" strings for unknown optional-in-practice

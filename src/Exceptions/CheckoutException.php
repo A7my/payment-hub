@@ -74,12 +74,11 @@ final class CheckoutException extends PaymentException
         );
     }
 
-    public static function sdkModeNotYetSupported(): self
+    public static function sdkModeNotSupportedByDriver(string $driver): self
     {
         return new self(
-            'driver_type "sdk" is not yet supported by this endpoint — neither driver currently exposes a ' .
-            'create-intent/return-client-reference operation for native SDK confirmation. Use driver_type ' .
-            '"webview" for now.',
+            "The [{$driver}] driver does not support driver_type \"sdk\" (it does not implement " .
+            'SupportsSdkCheckout). Use driver_type "webview" instead, or choose a driver that supports SDK checkout.',
             422,
         );
     }

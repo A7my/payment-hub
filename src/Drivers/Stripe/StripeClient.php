@@ -725,6 +725,57 @@ final class StripeClient
     }
 
     /**
+     * Create a Stripe PaymentIntent WITHOUT confirming it, for
+     * {@see StripeDriver::createSdkIntent()} — native-SDK checkout
+     * (`driver_type: sdk`).
+     *
+     * Deliberately the mirror image of {@see self::createPaymentIntent()}:
+     * that method always sets `confirm: true` because `charge()` represents
+     * an immediate server-side charge using a token the caller already has.
+     * This method never sets `confirm` at all and never sets `payment_method`
+     * — `PaymentLinkRequest` (the DTO this takes, same as
+     * {@see self::createCheckoutSession()}) has no token field, because the
+     * whole point of SDK mode is that no token exists yet: the customer
+     * enters their card in the NATIVE Stripe SDK on the client, which
+     * confirms this PaymentIntent directly against Stripe using the
+     * `client_secret` this call returns. No card data — not even a
+     * token — ever reaches this package's server for this flow.
+     *
+     * `automatic_payment_methods: {enabled: true}` lets Stripe's client SDK
+     * decide which payment methods to present, instead of this thin wrapper
+     * hardcoding `payment_method_types` the way
+     * {@see self::createCheckoutSession()} does for its own, different
+     * (hosted-page) reasons.
+     *
+     * Performs no interpretation of the result or of any exception raised —
+     * both are simply propagated to the caller.
+     *
+     * @param PaymentLinkRequest $request The checkout request — same shape createPaymentLink() takes.
+     *
+     * @return array<string, mixed> The raw, decoded Stripe PaymentIntent payload (needs `client_secret`).
+     *
+     * @throws \Stripe\Exception\ApiErrorException On any Stripe API error.
+     */
+    public function createUnconfirmedPaymentIntent(PaymentLinkRequest $request): array
+    {
+        $intent = $this->sdk()->paymentIntents->create(
+            array_filter(
+                [
+                    'amount'                    => $request->amount->amount,
+                    'currency'                  => strtolower($request->currency->value),
+                    'description'               => $request->description,
+                    'automatic_payment_methods' => ['enabled' => true],
+                    'metadata'                  => $request->metadata,
+                ],
+                static fn (mixed $value): bool => $value !== null && $value !== [],
+            ),
+            ['idempotency_key' => $request->idempotencyKey],
+        );
+
+        return $intent->toArray();
+    }
+
+    /**
      * Lazily build (or return the already-built) underlying Stripe SDK client.
      *
      * The secret key is read only from the driver configuration and is held
