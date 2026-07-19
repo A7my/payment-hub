@@ -520,11 +520,41 @@ final class PaymobClient
         $body = (array) $response->json();
 
         if ($response->failed()) {
-            $message = (string) ($body['detail'] ?? $body['message'] ?? "Paymob {$operation} request failed.");
-
-            throw new PaymobApiException($message, $response->status(), $body);
+            throw new PaymobApiException($this->extractErrorMessage($body, $operation), $response->status(), $body);
         }
 
         return $body;
+    }
+
+    /**
+     * Build a diagnostic message from a failed Paymob response body.
+     *
+     * UNVERIFIED: Paymob's error body shape is not confirmed across every
+     * endpoint (the legacy Accept API and the newer KSA Intention API may
+     * not even agree with each other). Rather than only checking `detail`/
+     * `message` and silently discarding everything else when neither is
+     * present (which produced an unhelpful generic "request failed" message
+     * with no diagnostic value on a real failure), this falls back to
+     * dumping the raw body verbatim — the caller should never see a bare
+     * "request failed" with no indication of why when Paymob actually sent
+     * a body back.
+     *
+     * @param array<string, mixed> $body
+     */
+    private function extractErrorMessage(array $body, string $operation): string
+    {
+        if (is_string($body['detail'] ?? null) && $body['detail'] !== '') {
+            return $body['detail'];
+        }
+
+        if (is_string($body['message'] ?? null) && $body['message'] !== '') {
+            return $body['message'];
+        }
+
+        if ($body !== []) {
+            return "Paymob {$operation} request failed: " . json_encode($body, JSON_UNESCAPED_SLASHES);
+        }
+
+        return "Paymob {$operation} request failed with an empty response body.";
     }
 }

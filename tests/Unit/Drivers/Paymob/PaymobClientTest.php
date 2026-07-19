@@ -340,4 +340,38 @@ final class PaymobClientTest extends TestCase
             $this->assertSame('Order validation failed.', $e->getBody()['detail']);
         }
     }
+
+    /** @test */
+    public function test_a_failed_response_without_detail_or_message_still_surfaces_the_raw_body(): void
+    {
+        // Regression guard: previously fell back to a generic "request
+        // failed" string with no diagnostic value whenever Paymob's error
+        // body didn't use 'detail' or 'message' — which is exactly what a
+        // real 400 from the newer Intention API did, hiding the actual
+        // cause. The raw body must now always be visible in the message.
+        $http = new HttpFactory();
+        $http->fake(['*/ecommerce/orders' => $http::response(['field_errors' => ['amount' => ['must be positive']]], 400)]);
+
+        try {
+            (new PaymobClient($this->config(), $http))->createOrder('auth_token', 1000, 'EGP', 'idem-key-001');
+            $this->fail('Expected PaymobApiException was not thrown.');
+        } catch (PaymobApiException $e) {
+            $this->assertStringContainsString('field_errors', $e->getMessage());
+            $this->assertStringContainsString('must be positive', $e->getMessage());
+        }
+    }
+
+    /** @test */
+    public function test_a_failed_response_with_an_empty_body_reports_that_explicitly(): void
+    {
+        $http = new HttpFactory();
+        $http->fake(['*/ecommerce/orders' => $http::response([], 400)]);
+
+        try {
+            (new PaymobClient($this->config(), $http))->createOrder('auth_token', 1000, 'EGP', 'idem-key-001');
+            $this->fail('Expected PaymobApiException was not thrown.');
+        } catch (PaymobApiException $e) {
+            $this->assertStringContainsString('empty response body', $e->getMessage());
+        }
+    }
 }
