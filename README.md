@@ -2,9 +2,8 @@
 
 A provider-agnostic payment framework for Laravel 12+ / PHP 8.4+, built around
 the Strategy pattern: switch payment providers via config, not application
-code. Stripe is the first (and currently only) built-in driver; PayPal,
-Paymob, and MyFatoorah are planned but **not yet implemented** — see
-[Status](#status) below.
+code. Stripe and Paymob are built in today; PayPal and MyFatoorah are planned
+but **not yet implemented** — see [Status](#status) below.
 
 ## Install
 
@@ -206,28 +205,6 @@ pricing, and does not create Products/Prices on your behalf.
 
 See the [dedicated walkthrough](#createpaymentlink-walkthrough) below.
 
-```php
-use Mifatoyeh\LaravelPaymentFramework\Facades\Payment;
-   $response = Payment::driver('paymob')->createPaymentLink([
-        'amount'      => 10000,          // amount in smallest unit (cents) → $100.00
-        'currency'    => 'USD',
-        'description' => 'Sandbox test payment',
-        'customer' => [
-            'name'  => 'Mohamed Azmy',
-            'email' => 'azmy@example.com',
-        ],
-        'return_url' => url('/payment/success'),
-        'cancel_url' => url('/payment/cancel'),
-        'metadata' => [
-            'order_id' => 123,
-        ],
-    ]);
-
-    // Redirect to Paymob's hosted iframe checkout page
-    return ($response->getPaymentUrl());
-```php
-
-
 ## createPaymentLink() walkthrough
 
 `createPaymentLink()` itself is a generic driver method (same call shape for
@@ -298,6 +275,137 @@ then, use `lookup()` (via the transaction/session id) to confirm the actual
 payment status before fulfilling an order — never fulfil directly off of a
 `return_url` hit.
 
+## Generic checkout endpoint
+
+Everything above requires you to write your own controller/route. This
+package can also expose a single, ready-to-use checkout endpoint that works
+against any of your own Eloquent models, with zero routes or controllers of
+your own — you implement one interface on a model, register it in config,
+and the endpoint already exists.
+
+### 1. Implement `Payable` on your model
+
+```php
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Contracts\Auth\Authenticatable;
+use Mifatoyeh\LaravelPaymentFramework\Concerns\IsPayable;
+use Mifatoyeh\LaravelPaymentFramework\Contracts\Payable;
+
+class Order extends Model implements Payable
+{
+    use IsPayable;
+
+    // Tell the trait which columns hold the amount/currency — it reads
+    // them for you, no accessor methods to write. Both are optional
+    // (default to 'amount'/'currency' if omitted) and can be typed or
+    // untyped — either works, e.g. `protected $paymentAmountColumn = '...'`
+    // is equally fine if you prefer matching Eloquent's own untyped-
+    // property style ($table, $fillable, etc.).
+    protected string $paymentAmountColumn = 'total_cents';
+    protected string $paymentCurrencyColumn = 'currency_code';
+
+    // Which drivers THIS model may be paid through — checked even if a
+    // driver is otherwise configured and enabled application-wide.
+    public function getSupportedPaymentDrivers(): array
+    {
+        return ['stripe', 'paymob'];
+    }
+
+    // Called unconditionally by the endpoint's own controller, regardless
+    // of route middleware — this is your real security boundary, not
+    // whatever middleware you do or don't attach to the route.
+    public function authorizePayment(?Authenticatable $payer): bool
+    {
+        return $payer?->id === $this->user_id;
+    }
+}
+```
+
+`total_cents` must already be in the smallest currency unit (cents), same as
+everywhere else in this package. `currency_code` must be a value `Currency::from()`
+accepts (e.g. `'USD'`, `'EGP'`) — either a plain string column or store a
+`Currency` enum cast, both work.
+
+If your amount isn't a single stored column (e.g. it's computed from related
+rows), skip the trait and implement `getPaymentAmount()`/`getPaymentCurrency()`
+yourself — they just need to return `Money`/`Currency` values, however you
+get there.
+
+### 2. Register it in config
+
+```php
+// config/payment.php
+'payables' => [
+    'order' => \App\Models\Order::class,
+],
+```
+
+This is a deliberate allowlist, not optional boilerplate — the endpoint never
+resolves a class from the request directly; only keys registered here are
+reachable at all. An unregistered `model_type` gets a 422, not a lookup
+attempt.
+
+### 3. Call the endpoint from your frontend
+
+```
+POST /payment/checkout
+```
+
+```json
+{
+  "model_type": "order",
+  "model_id": "123",
+  "driver": "stripe",
+  "driver_type": "webview",
+  "return_url": "https://example.com/success",
+  "cancel_url": "https://example.com/cancel"
+}
+```
+
+- **`model_type`** — the key you used in `payment.payables` (`"order"` above), not a class name.
+- **`model_id`** — the record's primary key.
+- **`driver`** — `"stripe"`, `"paymob"`, etc. — must also be in that model's own `getSupportedPaymentDrivers()`.
+- **`driver_type`** — `"webview"` (works today — redirects to a hosted checkout page, same as `createPaymentLink()`) or `"sdk"` (**not implemented yet** — returns a clear 422, not a silent wrong response; see [Status](#status)).
+- **`return_url`/`cancel_url`** — forwarded straight through to the driver's `createPaymentLink()`.
+
+Success response (HTTP 200):
+
+```json
+{
+  "status": "success",
+  "checkout_url": "https://checkout.stripe.com/c/pay/...",
+  "link_id": "cs_test_...",
+  "expires_at": null,
+  "message": "Payment link created."
+}
+```
+
+Redirect the browser (or open a webview) to `checkout_url`. Failure responses
+always look like `{"status": "fail", "message": "..."}`, with the HTTP status
+telling you what kind of failure it was: `404` (no such record), `422`
+(unknown `model_type`, driver not allowed for this model, invalid
+`driver_type`), `403` (`authorizePayment()` returned false), `502` (the
+provider API itself failed).
+
+### Route configuration
+
+```php
+// config/payment.php
+'checkout' => [
+    'enabled'    => env('PAYMENT_CHECKOUT_ENABLED', true),
+    'route'      => env('PAYMENT_CHECKOUT_ROUTE', 'payment/checkout'),
+    'middleware' => ['web', 'auth'],
+],
+```
+
+Change `route` if `/payment/checkout` collides with something in your app, or
+set `enabled` to `false` to turn the auto-registered route off entirely (e.g.
+if you want to register it yourself with different middleware). The default
+`middleware` includes `auth`, but don't rely on that alone — `authorizePayment()`
+is checked by the controller itself regardless of what middleware ends up in
+front of the route, specifically so a middleware misconfiguration in your app
+doesn't silently turn into an authorization bypass.
+
 ## Events
 
 Every mutating operation dispatches a Laravel event you can listen for —
@@ -315,11 +423,19 @@ provider:
 | Driver     | charge / authorize / void / capture / refund | verify / lookup | saveCard / chargeToken | subscriptions | createPaymentLink | webhooks              |
 | ---------- | ---------------------------------------------- | ---------------- | ------------------------ | -------------- | ------------------ | ---------------------- |
 | Stripe     | ✅                                               | ✅                | ✅                        | ✅              | ✅                  | 🚧                      |
+| Paymob     | ✅                                               | ✅                | ✅                        | 🚫              | ✅                  | 🚧                      |
 | PayPal     | —                                                | —                 | —                         | —              | —                   | planned, not started   |
-| Paymob     | —                                                | —                 | —                         | —              | —                   | planned, not started   |
 | MyFatoorah | —                                                | —                 | —                         | —              | —                   | planned, not started   |
 
-✅ implemented and tested · 🚧 not yet implemented (throws until it is)
+✅ implemented and tested · 🚧 not yet implemented (throws until it is) · 🚫 not supported by this provider (throws `UnsupportedOperationException`)
+
+Two things worth knowing about Paymob specifically before relying on it:
+- It has no official SDK, so its driver was built from general API knowledge
+  and live-debugged against real errors rather than verified against SDK
+  source the way Stripe's was — treat it as less battle-tested.
+- `createSubscription()`/`cancelSubscription()` are permanently unsupported,
+  not just unimplemented — Paymob has no recurring-billing API resembling
+  Stripe's Subscription object.
 
 ## License
 
