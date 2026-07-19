@@ -54,12 +54,16 @@ final class WebhookProcessor
      */
     public function process(WebhookRequest $request): WebhookResponse
     {
-        // TODO: $this->events->dispatch(new WebhookReceived($request));
-        // TODO: $driver = $this->manager->driver($request->driver);
-        // TODO: $this->verifier->verify($driver, $request);
-        // TODO: $response = $driver->processWebhook($request);
-        // TODO: $this->events->dispatch(new WebhookProcessed($request, $response));
-        // TODO: return $response;
-        throw new \LogicException('WebhookProcessor::process() not yet implemented.');
+        $this->events->dispatch(new WebhookReceived($request));
+
+        $driver = $this->manager->driver($request->driver);
+
+        $this->verifier->verify($driver, $request);
+
+        $response = $driver->processWebhook($request);
+
+        $this->events->dispatch(new WebhookProcessed($request, $response));
+
+        return $response;
     }
 }

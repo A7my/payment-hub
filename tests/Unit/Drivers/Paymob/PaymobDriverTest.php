@@ -19,10 +19,13 @@ use Mifatoyeh\LaravelPaymentFramework\DTO\SubscriptionRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\TokenChargeRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\TransactionLookupRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\VoidRequest;
+use Mifatoyeh\LaravelPaymentFramework\DTO\WebhookRequest;
 use Mifatoyeh\LaravelPaymentFramework\Drivers\Paymob\PaymobClient;
 use Mifatoyeh\LaravelPaymentFramework\Drivers\Paymob\PaymobDriver;
+use Mifatoyeh\LaravelPaymentFramework\Drivers\Paymob\PaymobWebhookVerifier;
 use Mifatoyeh\LaravelPaymentFramework\Enums\Currency;
 use Mifatoyeh\LaravelPaymentFramework\Enums\PaymentStatus;
+use Mifatoyeh\LaravelPaymentFramework\Enums\WebhookEventType;
 use Mifatoyeh\LaravelPaymentFramework\Events\CardSaved;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentCaptured;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentFailed;
@@ -41,6 +44,7 @@ use Mifatoyeh\LaravelPaymentFramework\ValueObjects\CustomerId;
 use Mifatoyeh\LaravelPaymentFramework\ValueObjects\Money;
 use Mifatoyeh\LaravelPaymentFramework\ValueObjects\Token;
 use Mifatoyeh\LaravelPaymentFramework\ValueObjects\TransactionId;
+use Mifatoyeh\LaravelPaymentFramework\ValueObjects\WebhookSignature;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -488,6 +492,108 @@ final class PaymobDriverTest extends TestCase
         $this->assertSame('sau_csk_test_001', $response->getClientSecret());
         $this->assertSame('777', $response->getTransactionReference());
         $this->assertSame('sau_pk_test_001', $response->getPublishableKey());
+    }
+
+    // =========================================================================
+    // processWebhook() / verifyWebhookSignature()
+    // =========================================================================
+
+    /** @return array<string, mixed> A realistic flat Paymob "Transaction Processed Callback" payload. */
+    private function makeWebhookPayload(array $overrides = []): array
+    {
+        return array_merge([
+            'amount_cents'            => '10000',
+            'created_at'              => '2026-07-19T12:47:16.351233+03:00',
+            'currency'                => 'EGP',
+            'error_occured'           => 'false',
+            'has_parent_transaction'  => 'false',
+            'id'                      => '7773107',
+            'integration_id'          => '30075',
+            'is_3d_secure'            => 'true',
+            'is_auth'                 => 'false',
+            'is_capture'              => 'false',
+            'is_refunded'             => 'false',
+            'is_standalone_payment'   => 'true',
+            'is_voided'               => 'false',
+            'order'                   => '6976637',
+            'owner'                   => '23938',
+            'pending'                 => 'false',
+            'source_data.pan'         => '1111',
+            'source_data.sub_type'    => 'Visa',
+            'source_data.type'        => 'card',
+            'success'                 => 'true',
+            'merchant_order_id'       => 'idem-webhook-001',
+            'data.message'            => 'Approved',
+        ], $overrides);
+    }
+
+    private function makeWebhookRequest(array $payload): WebhookRequest
+    {
+        return new WebhookRequest(
+            driver: 'paymob',
+            rawBody: '',
+            headers: [],
+            signature: new WebhookSignature(''),
+            metadata: $payload,
+        );
+    }
+
+    /** @test */
+    public function test_verify_webhook_signature_accepts_a_correctly_signed_payload(): void
+    {
+        $driver  = new PaymobDriver(new NullLogger(), $this->events, new RetryService(1, 0, true), [
+            'api_key' => 'test-key', 'hmac_secret' => 'whsec_test',
+        ]);
+        $payload = $this->makeWebhookPayload();
+        $hmac    = (new PaymobWebhookVerifier(['hmac_secret' => 'whsec_test']))->compute($payload, 'whsec_test');
+
+        $this->assertTrue($driver->verifyWebhookSignature($this->makeWebhookRequest([...$payload, 'hmac' => $hmac])));
+    }
+
+    /** @test */
+    public function test_verify_webhook_signature_rejects_a_tampered_payload(): void
+    {
+        $driver  = new PaymobDriver(new NullLogger(), $this->events, new RetryService(1, 0, true), [
+            'api_key' => 'test-key', 'hmac_secret' => 'whsec_test',
+        ]);
+        $payload = $this->makeWebhookPayload();
+        $hmac    = (new PaymobWebhookVerifier(['hmac_secret' => 'whsec_test']))->compute($payload, 'whsec_test');
+
+        $tampered = [...$payload, 'amount_cents' => '1', 'hmac' => $hmac];
+
+        $this->assertFalse($driver->verifyWebhookSignature($this->makeWebhookRequest($tampered)));
+    }
+
+    /** @test */
+    public function test_process_webhook_maps_a_captured_transaction_to_payment_succeeded(): void
+    {
+        $response = $this->makeDriver()->processWebhook($this->makeWebhookRequest($this->makeWebhookPayload()));
+
+        $this->assertTrue($response->isSuccessful());
+        $this->assertSame(WebhookEventType::PaymentSucceeded, $response->getEventType());
+        $this->assertTrue($response->isPaymentSuccess());
+        $this->assertSame('Approved', $response->getMessage());
+        $this->assertSame('idem-webhook-001', $response->getRawPayload()['merchant_order_id']);
+    }
+
+    /** @test */
+    public function test_process_webhook_maps_a_declined_transaction_to_payment_failed(): void
+    {
+        $payload  = $this->makeWebhookPayload(['success' => 'false']);
+        $response = $this->makeDriver()->processWebhook($this->makeWebhookRequest($payload));
+
+        $this->assertSame(WebhookEventType::PaymentFailed, $response->getEventType());
+        $this->assertFalse($response->isPaymentSuccess());
+    }
+
+    /** @test */
+    public function test_process_webhook_maps_a_pending_transaction_to_unknown_event(): void
+    {
+        $payload  = $this->makeWebhookPayload(['pending' => 'true']);
+        $response = $this->makeDriver()->processWebhook($this->makeWebhookRequest($payload));
+
+        $this->assertSame(WebhookEventType::Unknown, $response->getEventType());
+        $this->assertTrue($response->isSuccessful()); // parsed fine — just an unrecognised event type
     }
 
     // =========================================================================

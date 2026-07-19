@@ -58,6 +58,12 @@ final class CheckoutControllerTest extends TestCase
         // Payable::authorizePayment() directly (the defense-in-depth
         // check), independent of whatever middleware a host app configures.
         $app['config']->set('payment.checkout.middleware', ['web']);
+
+        // This file tests the checkout-initiation HTTP contract only, not
+        // persistence — it doesn't create a checkout_transactions table.
+        // See CheckoutSdkConfirmTest for pending/confirmed transaction
+        // persistence coverage (it DOES create that table).
+        $app['config']->set('payment.checkout.persist_transactions', false);
     }
 
     protected function setUp(): void

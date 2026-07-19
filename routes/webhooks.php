@@ -9,7 +9,12 @@ use Mifatoyeh\LaravelPaymentFramework\Webhooks\WebhookController;
  * Payment Framework Webhook Routes
  *
  * Registers a single provider-agnostic webhook endpoint:
- *   POST /payment/webhook/{driver}
+ *   GET|POST /payment/webhook/{driver}
+ *
+ * Both verbs are registered — see WebhookController's own docblock for why:
+ * most providers POST a JSON body (Stripe), but Paymob's classic
+ * "Transaction Processed Callback" is a GET request with every field
+ * (including the HMAC) flattened into the query string.
  *
  * The {driver} path parameter routes the webhook to the correct driver
  * without requiring separate routes per provider.
@@ -21,7 +26,8 @@ use Mifatoyeh\LaravelPaymentFramework\Webhooks\WebhookController;
  * This file is loaded by PaymentServiceProvider::boot() when enabled.
  */
 Route::middleware(config('payment.webhook.middleware', ['api']))
-    ->post(
+    ->match(
+        ['get', 'post'],
         config('payment.webhook.prefix', 'payment/webhook') . '/{driver}',
         [WebhookController::class, 'handle']
     )

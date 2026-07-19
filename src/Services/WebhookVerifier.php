@@ -40,16 +40,19 @@ final class WebhookVerifier
      */
     public function verify(PaymentDriverContract $driver, WebhookRequest $request): void
     {
-        // TODO: $this->logger->info('Verifying webhook signature', ['driver' => $request->driver]);
-        // TODO: $valid = $driver->verifyWebhookSignature($request);
-        // TODO: if (!$valid) {
-        //           $this->logger->error('Webhook verification failed', [
-        //               'driver'    => $request->driver,
-        //               'signature' => substr($request->signature->toString(), 0, 32),
-        //           ]);
-        //           throw WebhookVerificationException::forDriver($request->driver, $request->signature->toString());
-        //       }
-        // TODO: $this->logger->info('Webhook signature verified', ['driver' => $request->driver]);
-        throw new \LogicException('WebhookVerifier::verify() not yet implemented.');
+        $this->logger->info('Verifying webhook signature', ['driver' => $request->driver]);
+
+        $valid = $driver->verifyWebhookSignature($request);
+
+        if (! $valid) {
+            $this->logger->error('Webhook verification failed', [
+                'driver'    => $request->driver,
+                'signature' => substr($request->signature->toString(), 0, 32),
+            ]);
+
+            throw WebhookVerificationException::forDriver($request->driver, $request->signature->toString());
+        }
+
+        $this->logger->info('Webhook signature verified', ['driver' => $request->driver]);
     }
 }

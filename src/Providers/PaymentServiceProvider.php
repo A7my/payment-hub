@@ -137,6 +137,27 @@ class PaymentServiceProvider extends ServiceProvider
             $this->loadRoutesFrom(__DIR__ . '/../../routes/checkout.php');
         }
 
+        // Bridge inbound provider webhooks to the checkout confirmation flow
+        // — this is what lets a customer's payment get confirmed
+        // automatically from the provider's own server-to-server callback,
+        // with no frontend "confirm" call required. See
+        // CheckoutService::confirmFromWebhook()'s own docblock for the full
+        // reasoning (in particular: why it does NOT call
+        // Payable::authorizePayment(), and how it correlates a webhook —
+        // which carries no model_type/model_id — back to the right model).
+        // Registered unconditionally (not gated by payment.checkout.enabled)
+        // since this only ever does anything when checkout() has previously
+        // recorded a matching pending transaction; it is a no-op otherwise.
+        \Illuminate\Support\Facades\Event::listen(
+            \Mifatoyeh\LaravelPaymentFramework\Events\WebhookProcessed::class,
+            static function (\Mifatoyeh\LaravelPaymentFramework\Events\WebhookProcessed $event): void {
+                app(CheckoutService::class)->confirmFromWebhook(
+                    $event->request->driver,
+                    $event->response->getRawPayload(),
+                );
+            },
+        );
+
         // Register PaymentSucceeded listener for optional repository persistence
         // TODO: if (config('payment.repository.enabled', false)) {
         //           \Illuminate\Support\Facades\Event::listen(

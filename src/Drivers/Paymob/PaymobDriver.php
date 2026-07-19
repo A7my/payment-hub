@@ -23,6 +23,8 @@ use Mifatoyeh\LaravelPaymentFramework\DTO\TransactionLookupRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\VoidRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\WebhookRequest;
 use Mifatoyeh\LaravelPaymentFramework\Drivers\AbstractDriver;
+use Mifatoyeh\LaravelPaymentFramework\Enums\PaymentStatus;
+use Mifatoyeh\LaravelPaymentFramework\Enums\WebhookEventType;
 use Mifatoyeh\LaravelPaymentFramework\Events\CardSaved;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentCaptured;
 use Mifatoyeh\LaravelPaymentFramework\Events\PaymentFailed;
@@ -103,6 +105,8 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
 
     private readonly PaymobExceptionMapper $exceptionMapper;
 
+    private readonly PaymobWebhookVerifier $webhookVerifier;
+
     public function __construct(
         PaymentLoggerContract $logger,
         Dispatcher $events,
@@ -114,6 +118,7 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
         $this->client          = new PaymobClient($config);
         $this->mapper          = new PaymobMapper();
         $this->exceptionMapper = new PaymobExceptionMapper();
+        $this->webhookVerifier = new PaymobWebhookVerifier($config);
     }
 
     /** {@inheritDoc} */
@@ -738,15 +743,123 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
         throw UnsupportedOperationException::forOperation('cancelSubscription', 'paymob');
     }
 
-    /** {@inheritDoc} */
+    /**
+     * {@inheritDoc}
+     *
+     * Handles Paymob's classic "Transaction Processed Callback" shape: a
+     * FLAT set of params (query string on a GET redirect/callback, or a
+     * form/query-flattened POST body — Paymob does not send nested JSON for
+     * this callback) with dotted keys for nested concepts (`source_data.pan`,
+     * `data.message`). {@see WebhookRequest::$metadata} carries that flat
+     * form as-is (see {@see \Mifatoyeh\LaravelPaymentFramework\Webhooks\WebhookController});
+     * this method un-flattens it back into the nested shape
+     * {@see PaymobMapper} already expects (the same shape `retrieveTransaction()`
+     * returns), so no separate webhook-only mapping logic is needed.
+     *
+     * `successful` is unconditionally true here (mirrors {@see self::lookup()}):
+     * a successfully PARSED webhook, not a successfully CAPTURED payment —
+     * check `getEventType()`/`isPaymentSuccess()` for the actual payment
+     * outcome, same convention as every other driver in this framework.
+     */
     public function processWebhook(WebhookRequest $request): WebhookResponse
     {
-        throw new \LogicException('PaymobDriver::processWebhook() not yet implemented.');
+        $normalized = $this->unflattenWebhookPayload($request->metadata);
+        $status     = $this->mapper->toStatusResponse($normalized);
+        $eventType  = $this->webhookEventTypeFor($status->getStatus());
+
+        $this->logInfo('Webhook processed', $this->buildLogContext('processWebhook', [
+            'event_type' => $eventType->value,
+            'status'     => $status->getStatus()->value,
+        ]));
+
+        return new WebhookResponse(
+            successful: true,
+            eventType: $eventType,
+            message: $status->getMessage(),
+            rawPayload: $request->metadata,
+        );
     }
 
-    /** {@inheritDoc} */
+    /**
+     * {@inheritDoc}
+     *
+     * Delegates to {@see PaymobWebhookVerifier} — see that class's own
+     * docblock for the UNVERIFIED-against-a-live-signature caveat and the
+     * exact field order used. Reads `hmac` from `$request->metadata`
+     * (Paymob sends it as a plain request param, not an HTTP header — see
+     * {@see \Mifatoyeh\LaravelPaymentFramework\Webhooks\WebhookController}
+     * for why `WebhookRequest::$signature` isn't used here instead).
+     */
     public function verifyWebhookSignature(WebhookRequest $request): bool
     {
-        throw new \LogicException('PaymobDriver::verifyWebhookSignature() not yet implemented.');
+        $providedHmac = (string) ($request->metadata['hmac'] ?? '');
+
+        return $this->webhookVerifier->verify($request->metadata, $providedHmac);
+    }
+
+    /**
+     * Reconstruct the one nested path {@see PaymobMapper::resolveMessage()}
+     * reads (`$raw['data']['message']`) and coerce the literal string
+     * booleans Paymob sends over a query string (`"true"`/`"false"`) into
+     * real PHP booleans, so {@see PaymobMapper}'s existing
+     * `$raw['pending'] === true`-style checks (written for `retrieveTransaction()`'s
+     * already-JSON-decoded shape) work identically for a webhook payload.
+     *
+     * Checks both `data.message` (a JSON body, or a payload built
+     * programmatically, keeps its literal dot) and `data_message` — PHP's
+     * `parse_str()` (which a GET request's query string goes through)
+     * silently rewrites dots to underscores in top-level parameter names
+     * before this package ever sees the request, so Paymob's real callback
+     * arrives with the underscored form, not the dotted one it documents;
+     * see {@see PaymobWebhookVerifier::fieldValue()} for the same caveat
+     * applied to HMAC field extraction.
+     *
+     * @param array<string, mixed> $flat
+     *
+     * @return array<string, mixed>
+     */
+    private function unflattenWebhookPayload(array $flat): array
+    {
+        $normalized = [];
+
+        foreach ($flat as $key => $value) {
+            $normalized[$key] = match ($value) {
+                'true'  => true,
+                'false' => false,
+                default => $value,
+            };
+        }
+
+        $message = $flat['data.message'] ?? $flat['data_message'] ?? null;
+
+        if ($message !== null) {
+            $normalized['data'] = ['message' => $message];
+        }
+
+        return $normalized;
+    }
+
+    /**
+     * Map a canonical {@see PaymentStatus} to a canonical {@see WebhookEventType}.
+     *
+     * UNVERIFIED: Paymob's callback fires once per transaction state change
+     * it decides to notify about — this framework has no confirmed mapping
+     * of exactly which Paymob states trigger a callback at all. `Pending`,
+     * `Cancelled`, and `Expired` map to `Unknown` rather than a guessed
+     * event type, since none of this framework's canonical event types
+     * cleanly represent them and a wrong guess is worse than an honest
+     * "unrecognised" — see {@see WebhookEventType::Unknown}'s own docblock.
+     */
+    private function webhookEventTypeFor(PaymentStatus $status): WebhookEventType
+    {
+        return match ($status) {
+            PaymentStatus::Captured                            => WebhookEventType::PaymentSucceeded,
+            PaymentStatus::Authorized                          => WebhookEventType::PaymentAuthorized,
+            PaymentStatus::Voided                               => WebhookEventType::PaymentVoided,
+            PaymentStatus::Refunded, PaymentStatus::PartiallyRefunded => WebhookEventType::RefundSucceeded,
+            PaymentStatus::Failed                               => WebhookEventType::PaymentFailed,
+            PaymentStatus::RequiresAction                       => WebhookEventType::PaymentActionRequired,
+            PaymentStatus::Pending, PaymentStatus::Cancelled, PaymentStatus::Expired => WebhookEventType::Unknown,
+        };
     }
 }

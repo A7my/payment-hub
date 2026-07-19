@@ -16,6 +16,15 @@ use Illuminate\Support\Facades\Schema;
  * by `confirm()` (gated only by `payment.checkout.persist_transactions`),
  * not behind the separate `payment.repository.enabled` flag.
  *
+ * One row exists per (driver, model_type, model_id) — created in a
+ * "pending" state by `CheckoutService::checkout()` the moment a driver
+ * order/intent is created, then updated in place (never duplicated) once
+ * the outcome is authoritatively known, either via an explicit
+ * `POST {route}/confirm` call or automatically via
+ * `CheckoutService::confirmFromWebhook()` (see that method's own docblock
+ * for how an inbound Paymob webhook — which never carries model_type/
+ * model_id itself — gets correlated back to this row via `merchant_order_id`).
+ *
  * Publish and run this migration:
  *   php artisan vendor:publish --tag=payment-migrations
  *   php artisan migrate
@@ -37,14 +46,23 @@ return new class extends Migration
             // "sdk" or "webview" — informational only, not required for lookup().
             $table->string('driver_type')->nullable();
 
-            // Provider-assigned transaction identifier, as returned by lookup().
-            $table->string('transaction_reference');
+            // The idempotency key checkout() generated and forwarded to the
+            // provider as its own order/merchant reference — the only thing
+            // an inbound webhook (which knows nothing about model_type/
+            // model_id) can correlate back to this row by. Set at checkout()
+            // time; unrelated to transaction_reference below.
+            $table->string('merchant_order_id')->nullable();
 
-            // Canonical payment status (PaymentStatus enum value) at last confirmation.
+            // Provider-assigned transaction identifier — null while pending
+            // (set once confirm()/confirmFromWebhook() knows it).
+            $table->string('transaction_reference')->nullable();
+
+            // Canonical payment status (PaymentStatus enum value) — "pending"
+            // from checkout() until a confirmation updates it.
             $table->string('status');
             $table->boolean('successful');
 
-            // Amount/currency captured from the Payable model at confirmation time.
+            // Amount/currency captured from the Payable model.
             $table->unsignedBigInteger('amount');
             $table->string('currency', 3);
 
@@ -55,12 +73,13 @@ return new class extends Migration
             $table->timestamps();
 
             $table->index(['model_type', 'model_id']);
+            $table->index(['driver', 'merchant_order_id']);
 
-            // A confirm() call is expected to be re-triggerable (double-submit,
-            // client retry) — this uniqueness constraint is what makes
-            // CheckoutService::persistTransaction() an upsert (updateOrCreate)
-            // rather than an ever-growing duplicate-row log per confirmation.
-            $table->unique(['driver', 'transaction_reference']);
+            // One row per (driver, model_type, model_id) — both the pending
+            // insert from checkout() and every later confirmation upsert
+            // into the SAME row via this key, rather than accumulating a
+            // duplicate per attempt/re-confirmation.
+            $table->unique(['driver', 'model_type', 'model_id']);
         });
     }
 

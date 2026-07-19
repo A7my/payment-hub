@@ -11,6 +11,7 @@
 
 ### RUN
 
+composer require a7my/payment-hub
 composer update a7my/payment-hub
 php artisan vendor:publish --tag=payment-config
 

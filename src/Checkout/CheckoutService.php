@@ -15,6 +15,7 @@ use Mifatoyeh\LaravelPaymentFramework\Contracts\Payable;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentLinkRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\TransactionLookupRequest;
 use Mifatoyeh\LaravelPaymentFramework\Drivers\PaymentDriverProxy;
+use Mifatoyeh\LaravelPaymentFramework\Enums\PaymentStatus;
 use Mifatoyeh\LaravelPaymentFramework\Events\CheckoutPaymentConfirmed;
 use Mifatoyeh\LaravelPaymentFramework\Exceptions\CheckoutException;
 use Mifatoyeh\LaravelPaymentFramework\Managers\PaymentManager;
@@ -36,9 +37,17 @@ use Mifatoyeh\LaravelPaymentFramework\ValueObjects\TransactionId;
  * {@see \Mifatoyeh\LaravelPaymentFramework\Services\PaymentService} is
  * built the same way.
  *
- * Both `checkout()` (starting a payment) and `confirm()` (authoritatively
- * verifying its outcome) live on this one service — see `confirm()`'s own
- * docblock for why persistence and callbacks happen there and not here.
+ * Three entry points live on this one service:
+ *   - `checkout()` — starts a payment, and records a PENDING
+ *     {@see CheckoutTransaction} row so it can be found again later.
+ *   - `confirm()` — authoritatively verifies the outcome when the CLIENT
+ *     (frontend after a webview redirect, or after an SDK reports success)
+ *     asks this package to check.
+ *   - `confirmFromWebhook()` — the same authoritative verification, but
+ *     triggered automatically by the PROVIDER's own server-to-server
+ *     webhook instead of a client request — see that method's own docblock
+ *     for why it exists and how it correlates a webhook (which carries no
+ *     model_type/model_id) back to the right row.
  */
 final class CheckoutService
 {
@@ -107,35 +116,37 @@ final class CheckoutService
                 throw CheckoutException::sdkModeNotSupportedByDriver($driver);
             }
 
-            return $wrapped->createSdkIntent($request);
+            $response = $wrapped->createSdkIntent($request);
+        } else {
+            $response = $driverInstance->createPaymentLink($request);
         }
 
-        return $driverInstance->createPaymentLink($request);
+        // Only reached after a non-throwing driver call — an order/intent
+        // genuinely exists at the provider now, so it's worth recording as
+        // pending. $request->idempotencyKey is what every driver forwards to
+        // the provider as ITS OWN order/merchant reference (see
+        // PaymobClient::createOrder()/createIntention()) — the only thing a
+        // later webhook can correlate back to this row by; see
+        // self::confirmFromWebhook()'s own docblock.
+        $this->createPendingTransaction($modelType, $modelId, $driver, $driverType, $request->idempotencyKey, $model);
+
+        return $response;
     }
 
     /**
-     * Authoritatively verify a checkout payment's outcome and react to it.
+     * Authoritatively verify a checkout payment's outcome and react to it,
+     * on a CLIENT's request (a frontend calling back after a webview
+     * redirect, or after an SDK reports it confirmed the charge).
      *
-     * Both `driver_type: webview` (the customer returns from a hosted page)
-     * and `driver_type: sdk` (a client-side SDK reports it confirmed the
-     * charge) are asynchronous from this package's perspective — neither
-     * `createPaymentLink()` nor `createSdkIntent()` itself charges anything.
      * This method NEVER trusts a client-supplied "it succeeded" claim: it
      * re-checks status directly with the provider via the driver's already-
-     * implemented, already-tested `lookup()`, then:
-     *   1. persists a {@see CheckoutTransaction} row (see
-     *      {@see self::persistTransaction()}),
-     *   2. calls the model's {@see HasPaymentCallback::onPaymentCompleted()}
-     *      if it implements that optional interface,
-     *   3. dispatches {@see CheckoutPaymentConfirmed} unconditionally, for
-     *      application-wide listeners.
+     * implemented, already-tested `lookup()`, then applies the result via
+     * {@see self::applyConfirmedStatus()}.
      *
-     * Callers should treat this as safely re-triggerable: a webview/SDK flow
-     * confirming twice (a double-submitting user, a retried client request)
-     * simply re-verifies and re-applies steps 1-3 — see
-     * {@see HasPaymentCallback::onPaymentCompleted()}'s own docblock for why
-     * implementations must be idempotent, and {@see self::persistTransaction()}
-     * for why step 1 is an upsert rather than a duplicate insert.
+     * `Payable::authorizePayment()` runs here because there IS a client
+     * making this request — compare {@see self::confirmFromWebhook()},
+     * which has no authenticated caller to check and relies on webhook
+     * signature verification as its trust boundary instead.
      *
      * @throws CheckoutException On an unknown/unauthorised model.
      */
@@ -157,6 +168,95 @@ final class CheckoutService
             transactionId: TransactionId::fromString($transactionReference),
         ));
 
+        $this->applyConfirmedStatus($modelType, $modelId, $driver, $driverType, $model, $status);
+
+        return $status;
+    }
+
+    /**
+     * The same authoritative confirmation as {@see self::confirm()}, but
+     * triggered automatically by the PROVIDER's own server-to-server
+     * webhook instead of a client request — wired via a `WebhookProcessed`
+     * listener in `PaymentServiceProvider::boot()`, called only after
+     * {@see \Mifatoyeh\LaravelPaymentFramework\Services\WebhookVerifier::verify()}
+     * has already confirmed the request genuinely came from the provider.
+     * That signature verification IS this method's trust boundary — unlike
+     * `confirm()`, there is no authenticated `$payer` in a server-to-server
+     * callback, so `Payable::authorizePayment()` is deliberately NOT called
+     * here.
+     *
+     * A webhook payload never carries `model_type`/`model_id` — providers
+     * only echo back whatever merchant-supplied order reference was set at
+     * creation time. `checkout()` persists a PENDING {@see CheckoutTransaction}
+     * row keyed by `(driver, merchant_order_id)` — the idempotency key it
+     * generated and forwarded as the provider's own order reference — the
+     * moment the order/intent is created; this method looks that row up to
+     * recover which model the payment was for.
+     *
+     * Deliberately silent (does not throw) when:
+     *   - no order/transaction reference can be read from the payload,
+     *   - no matching pending row exists (persistence disabled, or this
+     *     webhook has nothing to do with the checkout endpoint at all — a
+     *     webhook for a bare `charge()`/`saveCard()` call, for instance),
+     *   - the row's model has since been deleted.
+     * A webhook endpoint hard-failing on any of these would both reject
+     * legitimate unrelated provider traffic and let a caller probe for
+     * which order references exist.
+     *
+     * @param array<string, mixed> $rawPayload The webhook's raw, driver-specific payload
+     *                                          ({@see \Mifatoyeh\LaravelPaymentFramework\Responses\WebhookResponse::getRawPayload()}).
+     *                                          Currently only understands Paymob's flat
+     *                                          `merchant_order_id`/`id` keys — a second
+     *                                          driver implementing webhooks will need this
+     *                                          extended (or given a per-driver mapping).
+     */
+    public function confirmFromWebhook(string $driver, array $rawPayload): void
+    {
+        $merchantOrderId = (string) ($rawPayload['merchant_order_id'] ?? '');
+        $transactionId   = (string) ($rawPayload['id'] ?? '');
+
+        if ($merchantOrderId === '' || $transactionId === '') {
+            return;
+        }
+
+        $pending = CheckoutTransaction::query()
+            ->where('driver', $driver)
+            ->where('merchant_order_id', $merchantOrderId)
+            ->first();
+
+        if ($pending === null) {
+            return;
+        }
+
+        try {
+            $model = $this->resolvePayable($pending->model_type, $pending->model_id);
+        } catch (CheckoutException) {
+            return;
+        }
+
+        $status = $this->manager->driver($driver)->lookup(new TransactionLookupRequest(
+            transactionId: TransactionId::fromString($transactionId),
+        ));
+
+        $this->applyConfirmedStatus($pending->model_type, $pending->model_id, $driver, $pending->driver_type, $model, $status);
+    }
+
+    /**
+     * Shared reaction to an authoritatively-known payment outcome, used by
+     * both {@see self::confirm()} and {@see self::confirmFromWebhook()}:
+     * persist the transaction, run the model's callback, dispatch the
+     * app-wide event. Safe to call more than once for the same transaction
+     * — see {@see HasPaymentCallback::onPaymentCompleted()}'s own docblock
+     * for why implementations must be idempotent.
+     */
+    private function applyConfirmedStatus(
+        string $modelType,
+        string $modelId,
+        string $driver,
+        ?string $driverType,
+        Payable $model,
+        StatusResponse $status,
+    ): void {
         $this->persistTransaction($modelType, $modelId, $driver, $driverType, $model, $status);
 
         if ($model instanceof HasPaymentCallback) {
@@ -164,8 +264,43 @@ final class CheckoutService
         }
 
         $this->events->dispatch(new CheckoutPaymentConfirmed($model, $modelType, $status));
+    }
 
-        return $status;
+    /**
+     * Record a checkout attempt as pending, the moment a provider order/
+     * intent genuinely exists (called only after a non-throwing driver
+     * call — see {@see self::checkout()}). `merchant_order_id` is what
+     * makes {@see self::confirmFromWebhook()} possible at all — without a
+     * persisted row to correlate it against, an inbound webhook has no way
+     * to learn which model it belongs to.
+     *
+     * Gated by `payment.checkout.persist_transactions` (default true), same
+     * as {@see self::persistTransaction()} — see that method's own docblock.
+     */
+    private function createPendingTransaction(
+        string $modelType,
+        string $modelId,
+        string $driver,
+        string $driverType,
+        string $merchantOrderId,
+        Payable $model,
+    ): void {
+        if (! config('payment.checkout.persist_transactions', true)) {
+            return;
+        }
+
+        CheckoutTransaction::updateOrCreate(
+            ['driver' => $driver, 'model_type' => $modelType, 'model_id' => $modelId],
+            [
+                'driver_type'       => $driverType,
+                'merchant_order_id' => $merchantOrderId,
+                'status'            => PaymentStatus::Pending->value,
+                'successful'        => false,
+                'amount'            => $model->getPaymentAmount()->amount,
+                'currency'          => $model->getPaymentCurrency()->value,
+                'message'           => 'Checkout started; awaiting confirmation.',
+            ],
+        );
     }
 
     /**
@@ -175,10 +310,11 @@ final class CheckoutService
      * `checkout_transactions` migration doesn't hit a missing-table error
      * merely by using the checkout endpoint.
      *
-     * `updateOrCreate()` keyed on (driver, transaction_reference) — the same
-     * pair the migration's own unique index enforces — makes repeat
-     * `confirm()` calls for the same transaction update the existing row
-     * with the latest status rather than accumulating duplicates.
+     * `updateOrCreate()` keyed on `(driver, model_type, model_id)` — the
+     * same triple the migration's own unique index enforces, and the same
+     * key {@see self::createPendingTransaction()} inserted under — makes
+     * both the initial pending write and every later confirmation land on
+     * the SAME row rather than accumulating duplicates.
      *
      * @param Model&Payable $model
      */
@@ -195,21 +331,20 @@ final class CheckoutService
         }
 
         CheckoutTransaction::updateOrCreate(
-            [
-                'driver'                 => $driver,
-                'transaction_reference'  => $status->getTransactionId()->toString(),
-            ],
-            [
-                'model_type'   => $modelType,
-                'model_id'     => $modelId,
-                'driver_type'  => $driverType,
-                'status'       => $status->getStatus()->value,
-                'successful'   => $status->isSuccessful() && $status->getStatus()->isSuccessful(),
-                'amount'       => $model->getPaymentAmount()->amount,
-                'currency'     => $model->getPaymentCurrency()->value,
-                'message'      => $status->getMessage(),
-                'raw_response' => $status->getRawResponse(),
-            ],
+            ['driver' => $driver, 'model_type' => $modelType, 'model_id' => $modelId],
+            array_filter(
+                [
+                    'driver_type'            => $driverType,
+                    'transaction_reference'  => $status->getTransactionId()->toString(),
+                    'status'                 => $status->getStatus()->value,
+                    'successful'             => $status->isSuccessful() && $status->getStatus()->isSuccessful(),
+                    'amount'                 => $model->getPaymentAmount()->amount,
+                    'currency'               => $model->getPaymentCurrency()->value,
+                    'message'                => $status->getMessage(),
+                    'raw_response'           => $status->getRawResponse(),
+                ],
+                static fn (mixed $value): bool => $value !== null,
+            ),
         );
     }
 
