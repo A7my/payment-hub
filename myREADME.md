@@ -144,7 +144,7 @@ class User extends Authenticatable implements JWTSubject, Payable
 
 'checkout' => [
     'enabled'    => env('PAYMENT_CHECKOUT_ENABLED', true),
-    'route'      => env('PAYMENT_CHECKOUT_ROUTE', 'payment/checkout'),
+    'route'      => env('PAYMENT_CHECKOUT_ROUTE', 'payment/checkout'), // you can change the route here.
     'middleware' => ['api', 'auth:api'],
 
 ],
