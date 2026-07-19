@@ -206,16 +206,20 @@ against what `request()->all()` reports and wondering why they don't match.
 Two independent mechanisms fire on every `confirm()` call — use whichever
 fits, or both:
 
-### Per-model: `HasPaymentCallback`
+### Per-model: `Payable::onPaymentCompleted()`
 
-Implement this on a `Payable` model to run model-specific logic — mark an
-order paid, credit a wallet, activate a subscription:
+`onPaymentCompleted()` is a required method on `Payable` itself — implement
+it to run model-specific logic when its payment is confirmed: mark an order
+paid, credit a wallet, activate a subscription.
+
+If your model uses `IsPayable` (the common case), you get a default no-op
+for free and only need to write this method when you actually have
+per-model logic to run:
 
 ```php
-use Mifatoyeh\LaravelPaymentFramework\Contracts\HasPaymentCallback;
 use Mifatoyeh\LaravelPaymentFramework\Responses\StatusResponse;
 
-class Order extends Model implements Payable, HasPaymentCallback
+class Order extends Model implements Payable
 {
     use IsPayable;
 
@@ -236,9 +240,9 @@ class Order extends Model implements Payable, HasPaymentCallback
 }
 ```
 
-This is entirely opt-in — a `Payable` model that doesn't implement
-`HasPaymentCallback` keeps working exactly as before; nothing about the
-base `Payable` interface changed. Each model gets its **own** callback —
+If you implement `Payable` by hand (without `IsPayable`), you must add this
+method yourself — a one-line no-op body (`{}`) is fine if you only care
+about the app-wide event below. Each model gets its **own** callback —
 `Order` and `Wallet` react completely differently to a confirmed payment,
 so this is deliberately per-model, not one global hook.
 

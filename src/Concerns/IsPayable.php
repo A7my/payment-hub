@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Mifatoyeh\LaravelPaymentFramework\Concerns;
 
 use Mifatoyeh\LaravelPaymentFramework\Enums\Currency;
+use Mifatoyeh\LaravelPaymentFramework\Responses\StatusResponse;
 use Mifatoyeh\LaravelPaymentFramework\ValueObjects\Money;
 
 /**
@@ -39,6 +40,12 @@ use Mifatoyeh\LaravelPaymentFramework\ValueObjects\Money;
  * `authorizePayment()` — both are genuine per-model business logic (which
  * drivers are allowed, who's allowed to pay), not a column-mapping concern,
  * so every `Payable` model must still provide them itself.
+ *
+ * DOES provide a default no-op {@see self::onPaymentCompleted()} — unlike
+ * the two methods above, "do nothing" is a perfectly reasonable default for
+ * a model that only cares about {@see \Mifatoyeh\LaravelPaymentFramework\Events\CheckoutPaymentConfirmed}'s
+ * app-wide event and has no per-model reaction logic of its own. Override
+ * it in the consuming class when you do.
  */
 trait IsPayable
 {
@@ -52,6 +59,11 @@ trait IsPayable
         $value = $this->{$this->paymentCurrencyColumn()};
 
         return $value instanceof Currency ? $value : Currency::from(strtoupper((string) $value));
+    }
+
+    public function onPaymentCompleted(StatusResponse $status): void
+    {
+        // Intentionally empty — override in the consuming model if it needs to react.
     }
 
     /**

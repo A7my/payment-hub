@@ -179,4 +179,78 @@ final class PaymobKsaBugConditionTest extends TestCase
             return true;
         });
     }
+
+    /**
+     * **Regression test** — retrieveTransaction() (called unconditionally by
+     * verify()/lookup(), regardless of how the transaction was created) must
+     * hit the LEGACY base_url (with `/api` retained) in KSA mode, NOT the
+     * Intention API's root URL.
+     *
+     * Bug history: `PaymobClient::request()` used to strip `/api` for EVERY
+     * KSA-mode call, not just `createIntention()`'s — silently breaking
+     * `retrieveTransaction()` (a real production 404 with an empty body,
+     * since `/acceptance/transactions/{id}` doesn't exist at the KSA root).
+     * Only `createIntention()` should ever hit the root; every other
+     * endpoint — including this one — is a legacy path that keeps `/api`.
+     *
+     * UNVERIFIED beyond "this is what the code's own prior documented
+     * intent already said" — not confirmed against a real KSA account. If
+     * `/acceptance/transactions/{id}` turns out not to exist on Paymob's
+     * KSA platform AT ALL (with or without `/api`), this test would need
+     * updating once the real endpoint is confirmed.
+     *
+     * @dataProvider ksaConfigProvider
+     */
+    public function test_ksa_retrieve_transaction_keeps_the_api_suffix(array $config): void
+    {
+        $http = new HttpFactory();
+        $http->fake([
+            '*/acceptance/transactions/*' => $http::response(['id' => 999, 'success' => true], 200),
+        ]);
+
+        $client = new PaymobClient($config, $http);
+        $client->retrieveTransaction('__any_token__', '999');
+
+        $http->assertSent(function ($request) use ($config) {
+            $url          = $request->url();
+            $expectedHost = rtrim($config['base_url'], '/'); // e.g. https://ksa.paymob.com/api or https://accept.paymob.com/api
+
+            $this->assertStringStartsWith(
+                $expectedHost . '/acceptance/transactions/',
+                $url,
+                "retrieveTransaction() should keep the configured base_url (including any /api suffix) " .
+                "in KSA mode — got '{$url}', expected it to start with '{$expectedHost}/acceptance/transactions/'.",
+            );
+
+            return true;
+        });
+    }
+
+    /**
+     * **Regression test** — createIntention() is the ONE call that strips
+     * `/api` (the Intention API lives at the KSA root) — confirms the fix
+     * didn't accidentally stop stripping it there too.
+     *
+     * @dataProvider ksaConfigProvider
+     */
+    public function test_ksa_create_intention_strips_the_api_suffix(array $config): void
+    {
+        $http = new HttpFactory();
+        $http->fake([
+            '*/v1/intention/*' => $http::response(['client_secret' => 'sau_csk_test_1'], 200),
+        ]);
+
+        $client = new PaymobClient($config, $http);
+        $client->createIntention(1000, 'SAR', ['first_name' => 'NA'], 'ord-1');
+
+        $http->assertSent(function ($request) {
+            $this->assertStringNotContainsString(
+                '/api/v1/intention/',
+                $request->url(),
+                "createIntention() should strip the /api suffix — got '{$request->url()}'.",
+            );
+
+            return true;
+        });
+    }
 }

@@ -12,7 +12,6 @@ use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
 use Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutTransaction;
 use Mifatoyeh\LaravelPaymentFramework\Concerns\IsPayable;
-use Mifatoyeh\LaravelPaymentFramework\Contracts\HasPaymentCallback;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Payable;
 use Mifatoyeh\LaravelPaymentFramework\Drivers\Paymob\PaymobClient;
 use Mifatoyeh\LaravelPaymentFramework\Drivers\Paymob\PaymobWebhookVerifier;
@@ -262,9 +261,10 @@ final class PaymobWebhookCheckoutTest extends TestCase
 }
 
 /**
- * Test-only Payable + HasPaymentCallback Eloquent model.
+ * Test-only Payable Eloquent model (onPaymentCompleted() is now part of
+ * Payable itself, not a separate interface).
  */
-final class PaymobWebhookTestOrder extends Model implements Payable, HasPaymentCallback
+final class PaymobWebhookTestOrder extends Model implements Payable
 {
     use IsPayable;
 

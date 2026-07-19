@@ -13,7 +13,6 @@ use Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutTransaction;
 use Mifatoyeh\LaravelPaymentFramework\Concerns\IsPayable;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\PaymentDriverContract;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\SupportsSdkCheckout;
-use Mifatoyeh\LaravelPaymentFramework\Contracts\HasPaymentCallback;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Payable;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CancelSubscriptionRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CaptureRequest;
@@ -240,11 +239,12 @@ final class CheckoutSdkConfirmTest extends TestCase
 }
 
 /**
- * Test-only Payable Eloquent model that ALSO implements HasPaymentCallback —
- * records every `onPaymentCompleted()` call statically so tests can assert
- * on it without a second round-trip through the database.
+ * Test-only Payable Eloquent model — records every `onPaymentCompleted()`
+ * call statically so tests can assert on it without a second round-trip
+ * through the database. (onPaymentCompleted() is part of Payable itself,
+ * not a separate interface.)
  */
-final class CheckoutSdkTestOrder extends Model implements Payable, HasPaymentCallback
+final class CheckoutSdkTestOrder extends Model implements Payable
 {
     use IsPayable;
 

@@ -10,7 +10,6 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Str;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\PaymentDriverContract;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\SupportsSdkCheckout;
-use Mifatoyeh\LaravelPaymentFramework\Contracts\HasPaymentCallback;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Payable;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentLinkRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\TransactionLookupRequest;
@@ -246,8 +245,13 @@ final class CheckoutService
      * both {@see self::confirm()} and {@see self::confirmFromWebhook()}:
      * persist the transaction, run the model's callback, dispatch the
      * app-wide event. Safe to call more than once for the same transaction
-     * — see {@see HasPaymentCallback::onPaymentCompleted()}'s own docblock
-     * for why implementations must be idempotent.
+     * — see {@see Payable::onPaymentCompleted()}'s own docblock for why
+     * implementations must be idempotent.
+     *
+     * `onPaymentCompleted()` is called unconditionally, with no `instanceof`
+     * check — it's a required method on `Payable` itself (see that
+     * interface's own docblock for the "merged from HasPaymentCallback"
+     * history), not an optional capability to detect.
      */
     private function applyConfirmedStatus(
         string $modelType,
@@ -259,9 +263,7 @@ final class CheckoutService
     ): void {
         $this->persistTransaction($modelType, $modelId, $driver, $driverType, $model, $status);
 
-        if ($model instanceof HasPaymentCallback) {
-            $model->onPaymentCompleted($status);
-        }
+        $model->onPaymentCompleted($status);
 
         $this->events->dispatch(new CheckoutPaymentConfirmed($model, $modelType, $status));
     }

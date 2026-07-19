@@ -216,7 +216,7 @@ return [
         //   php artisan vendor:publish --tag=payment-migrations
         //   php artisan migrate
         // Set to false if you haven't run that migration yet, or you handle
-        // your own persistence via HasPaymentCallback/CheckoutPaymentConfirmed.
+        // your own persistence via Payable::onPaymentCompleted()/CheckoutPaymentConfirmed.
         'persist_transactions' => env('PAYMENT_CHECKOUT_PERSIST_TRANSACTIONS', true),
     ],
 

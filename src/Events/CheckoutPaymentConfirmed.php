@@ -13,10 +13,10 @@ use Mifatoyeh\LaravelPaymentFramework\Responses\StatusResponse;
  *
  * Fires unconditionally on every confirmation (regardless of whether
  * `$status->isSuccessful()` is true), alongside — not instead of — the
- * per-model {@see \Mifatoyeh\LaravelPaymentFramework\Contracts\HasPaymentCallback::onPaymentCompleted()}
+ * per-model {@see \Mifatoyeh\LaravelPaymentFramework\Contracts\Payable::onPaymentCompleted()}
  * callback: this event is for application-wide listeners (analytics,
  * notifications, logging) that don't belong to any one model; the callback
- * interface is for model-specific side effects. Use whichever fits, or both.
+ * method is for model-specific side effects. Use whichever fits, or both.
  */
 final readonly class CheckoutPaymentConfirmed
 {

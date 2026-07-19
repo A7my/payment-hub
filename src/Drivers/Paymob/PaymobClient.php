@@ -155,7 +155,7 @@ final class PaymobClient
         array $billingData,
         string $merchantOrderId,
     ): array {
-        $response = $this->request()->post('/v1/intention/', [
+        $response = $this->request(intentionApi: true)->post('/v1/intention/', [
             'amount'           => $amountCents,
             'currency'         => $currency,
             'payment_methods'  => [(int) ($this->config['integration_id'] ?? 0)],
@@ -494,19 +494,37 @@ final class PaymobClient
      * Lazily build a pre-configured pending HTTP request.
      *
      * Egypt mode: base_url is e.g. https://accept.paymob.com/api — auth via body fields.
-     * KSA mode:   base_url is https://ksa.paymob.com/api for legacy paths, but the
-     *             Intention API lives at the root https://ksa.paymob.com — so we strip
-     *             the /api suffix for KSA and let each method provide its full path
-     *             (e.g. /v1/intention/, /ecommerce/orders, etc.).
-     *             Auth is via Authorization: Bearer <secret_key>.
+     * KSA mode:   base_url is https://ksa.paymob.com/api for LEGACY paths
+     *             (/auth/tokens, /ecommerce/orders, /acceptance/*) — the
+     *             `/api` suffix is kept for these; only the newer Intention
+     *             API lives at the root https://ksa.paymob.com, so `/api` is
+     *             stripped ONLY when `$intentionApi` is true. Auth is via
+     *             Authorization: Bearer <secret_key> either way.
+     *
+     * BUG FIX (previously unconditional): every KSA-mode call used to strip
+     * `/api` regardless of which endpoint it was for, which silently broke
+     * {@see self::retrieveTransaction()} — the one legacy method still
+     * called unconditionally in KSA mode (via `verify()`/`lookup()`,
+     * regardless of how the transaction was created) — producing a bare
+     * HTTP 404 with an empty body (a route that doesn't exist at the
+     * gateway level, not a real "transaction not found" JSON error from
+     * Paymob's own backend) rather than a working lookup.
+     * UNVERIFIED: this fix follows this method's own prior documented intent
+     * (legacy paths keep `/api`) but has not been confirmed against a real
+     * KSA account — if `retrieveTransaction()` still 404s after this
+     * change, the legacy `/acceptance/transactions/{id}` path may simply
+     * not exist on Paymob's KSA platform at all, which would need Paymob's
+     * own docs/support to confirm the correct KSA-mode retrieval endpoint.
+     *
+     * @param bool $intentionApi True only for {@see self::createIntention()}.
      */
-    private function request(): PendingRequest
+    private function request(bool $intentionApi = false): PendingRequest
     {
         $baseUrl = rtrim((string) ($this->config['base_url'] ?? 'https://accept.paymob.com/api'), '/');
 
-        if ($this->isKsaMode()) {
-            // Strip /api suffix — KSA Intention API lives at root
-            $baseUrl = rtrim(str_replace('/api', '', $baseUrl), '/');
+        if ($this->isKsaMode() && $intentionApi) {
+            // Strip /api suffix — the Intention API lives at the KSA root, unlike every legacy path.
+            $baseUrl = rtrim(preg_replace('#/api$#', '', $baseUrl) ?? $baseUrl, '/');
         }
 
         $pending = $this->http
