@@ -526,6 +526,54 @@ longer resolves to a real row, or the guard's provider doesn't support
 `retrieveById()` (a few third-party guard packages don't). Handle a `null`
 payer the same way you'd handle a missing `payerId`.
 
+#### Snapshotting anything else: `CapturesCheckoutContext`
+
+`payerId`/`payer()` cover "who was logged in." For anything else that only
+exists, or only has a specific value, during the ORIGINAL `checkout()` call
+— a locked-in price, a discount/referral code, a related record picked at
+initiation — implement this optional companion interface on your model:
+
+```php
+use Mifatoyeh\LaravelPaymentFramework\Contracts\CapturesCheckoutContext;
+
+class Order extends Model implements Payable, CapturesCheckoutContext
+{
+    use IsPayable;
+
+    public function captureCheckoutContext(): array
+    {
+        return [
+            'discount_code' => request()->input('discount_code'),
+            'price_locked'  => $this->currentPrice(),
+        ];
+    }
+
+    public function onPaymentCompleted(StatusResponse $status, CheckoutContext $context): void
+    {
+        $discountCode = $context->get('discount_code');
+        $lockedPrice  = $context->custom['price_locked'];
+        // ...
+    }
+}
+```
+
+`captureCheckoutContext()` is called **once**, by `checkout()`, right after
+`payerId` is captured — its return value is persisted the same way and read
+back via `$context->custom` (or `$context->get('key', $default)`).
+
+This is deliberately NOT automatic — the package will never scan or record
+arbitrary database activity on your behalf. You decide exactly what's
+relevant and safe to snapshot by returning it here; nothing is captured for
+a model that doesn't implement this interface at all (`$context->custom` is
+just `[]`). Whatever you return must be JSON-serialisable — pass specific
+column values, not Eloquent model instances.
+
+Note this only ever reflects state as it was **at `checkout()` time** — if
+you need something reachable via a normal relation on the model as it
+exists NOW (at confirmation time), you don't need this at all: `$this` in
+`onPaymentCompleted()` is a fully-loaded model, `$this->someRelation` works
+exactly like anywhere else in your app.
+
 **If your model needs `user_id` for anything (creating a related row, an
 authorization check that runs later, etc.), don't put the shared/catalog
 row behind `Payable` at all — put the per-user row behind it instead**, and

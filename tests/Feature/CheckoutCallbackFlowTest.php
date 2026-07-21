@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Schema;
 use Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutContext;
 use Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutTransaction;
 use Mifatoyeh\LaravelPaymentFramework\Concerns\IsPayable;
+use Mifatoyeh\LaravelPaymentFramework\Contracts\CapturesCheckoutContext;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\PaymentDriverContract;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\SupportsCallbackHook;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Payable;
@@ -227,6 +228,13 @@ final class CheckoutCallbackFlowTest extends TestCase
         $this->assertSame('web', $context->os);
         $this->assertSame($pending->merchant_order_id, $context->merchantOrderId);
 
+        // CapturesCheckoutContext: snapshotted at checkout() time, read back
+        // here even though this whole request is the provider's callback,
+        // not the original authenticated one.
+        $this->assertSame('ORDER-' . $order->id, $context->custom['sku']);
+        $this->assertSame('captured at checkout time', $context->get('note'));
+        $this->assertSame($pending->metadata['custom']['sku'], $context->custom['sku']);
+
         $pending->refresh();
         $this->assertSame(PaymentStatus::Captured->value, $pending->status);
         $this->assertSame('cs_test_from_provider_001', $pending->transaction_reference);
@@ -278,9 +286,11 @@ final class CheckoutCallbackFlowTest extends TestCase
 }
 
 /**
- * Test-only Payable model recording onPaymentCompleted() calls.
+ * Test-only Payable model recording onPaymentCompleted() calls — also
+ * implements CapturesCheckoutContext to prove the opt-in snapshot mechanism
+ * flows through checkout() -> the pending row -> CheckoutContext.custom.
  */
-final class CheckoutCallbackTestOrder extends Model implements Payable
+final class CheckoutCallbackTestOrder extends Model implements Payable, CapturesCheckoutContext
 {
     use IsPayable;
 
@@ -308,6 +318,11 @@ final class CheckoutCallbackTestOrder extends Model implements Payable
     {
         self::$callbackInvocations[] = $status;
         self::$contextsReceived[]    = $context;
+    }
+
+    public function captureCheckoutContext(): array
+    {
+        return ['sku' => 'ORDER-' . $this->id, 'note' => 'captured at checkout time'];
     }
 }
 

@@ -9,6 +9,7 @@ use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Str;
 use Mifatoyeh\LaravelPaymentFramework\Checkout\Jobs\VerifyPaymentJob;
+use Mifatoyeh\LaravelPaymentFramework\Contracts\CapturesCheckoutContext;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\PaymentDriverContract;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\SupportsCallbackHook;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\SupportsCapabilities;
@@ -176,6 +177,10 @@ final class CheckoutService
             // them have a session of their own. getAuthIdentifier() (not
             // ->id) to stay framework-agnostic about what Authenticatable is.
             $payer?->getAuthIdentifier() !== null ? (string) $payer->getAuthIdentifier() : null,
+            // Opt-in, model-decided snapshot — see CapturesCheckoutContext's
+            // own docblock. Empty array (not called at all) for any model
+            // that doesn't implement it; never automatic/reflective.
+            $model instanceof CapturesCheckoutContext ? $model->captureCheckoutContext() : [],
             // sdk mode's own reference IS the value lookup()/verify() needs
             // later (Stripe's PaymentIntent id stays stable through its
             // lifecycle) — stored immediately so VerifyPaymentJob/the sweep
@@ -438,14 +443,16 @@ final class CheckoutService
      * persisted row to correlate it against, an inbound webhook/callback
      * has no way to learn which model it belongs to.
      *
-     * `return_url`/`cancel_url`/`os`/`payer_id` are folded into the existing
-     * `metadata` JSON column rather than given dedicated columns — they're
-     * only ever read back by primary-key lookup (never filtered/queried
-     * on), so a dedicated column each would just be migration overhead for
-     * no query benefit. {@see CheckoutCallbackController} reads
-     * `os`/`return_url`/`cancel_url` back out directly;
-     * {@see CheckoutContext::fromTransaction()} reads all four when building
-     * what {@see Payable::onPaymentCompleted()} receives.
+     * `return_url`/`cancel_url`/`os`/`payer_id`/`custom` are folded into the
+     * existing `metadata` JSON column rather than given dedicated columns —
+     * they're only ever read back by primary-key lookup (never filtered/
+     * queried on), so a dedicated column each would just be migration
+     * overhead for no query benefit. `custom` is whatever
+     * {@see \Mifatoyeh\LaravelPaymentFramework\Contracts\CapturesCheckoutContext::captureCheckoutContext()}
+     * returned, when the model implements it — empty array otherwise.
+     * {@see CheckoutCallbackController} reads `os`/`return_url`/`cancel_url`
+     * back out directly; {@see CheckoutContext::fromTransaction()} reads all
+     * five when building what {@see Payable::onPaymentCompleted()} receives.
      *
      * Gated by `payment.checkout.persist_transactions` (default true), same
      * as {@see self::persistTransaction()} — see that method's own docblock.
@@ -453,6 +460,7 @@ final class CheckoutService
      * requires persistence to be enabled — there is no correlation without
      * a stored row.
      */
+    /** @param array<string, mixed> $custom */
     private function createPendingTransaction(
         string $modelType,
         string $modelId,
@@ -463,6 +471,7 @@ final class CheckoutService
         ?string $returnUrl,
         ?string $cancelUrl,
         ?string $payerId,
+        array $custom,
         ?string $initialTransactionReference,
         Payable $model,
     ): ?CheckoutTransaction {
@@ -490,6 +499,7 @@ final class CheckoutService
                         'return_url' => $returnUrl,
                         'cancel_url' => $cancelUrl,
                         'payer_id'   => $payerId,
+                        'custom'     => $custom,
                     ],
                 ],
                 static fn (mixed $value): bool => $value !== null,

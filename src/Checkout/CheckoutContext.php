@@ -36,15 +36,24 @@ use Throwable;
  * `payerId` and `os` are `null` when `payment.checkout.persist_transactions`
  * is disabled (no row to read them back from) or, for `payerId`, when the
  * original checkout request itself was unauthenticated.
+ *
+ * `custom` is the one EXTENSIBLE field — everything else above is a fixed,
+ * named piece of data this package itself decided to capture. A `Payable`
+ * model can snapshot anything else it needs by implementing
+ * {@see \Mifatoyeh\LaravelPaymentFramework\Contracts\CapturesCheckoutContext} —
+ * see that interface's own docblock. Empty array when the model doesn't
+ * implement it, never `null` — always safe to iterate/index into directly.
  */
 final readonly class CheckoutContext implements JsonSerializable
 {
+    /** @param array<string, mixed> $custom */
     public function __construct(
         public ?string $payerId,
         public string $driver,
         public ?string $driverType,
         public ?string $os,
         public ?string $merchantOrderId,
+        public array $custom = [],
     ) {
     }
 
@@ -61,7 +70,18 @@ final readonly class CheckoutContext implements JsonSerializable
             driverType: $transaction->driver_type,
             os: isset($metadata['os']) ? (string) $metadata['os'] : null,
             merchantOrderId: $transaction->merchant_order_id,
+            custom: (array) ($metadata['custom'] ?? []),
         );
+    }
+
+    /**
+     * Convenience accessor into {@see self::$custom} with a default —
+     * `$context->get('discount_code')` instead of
+     * `$context->custom['discount_code'] ?? null`.
+     */
+    public function get(string $key, mixed $default = null): mixed
+    {
+        return $this->custom[$key] ?? $default;
     }
 
     /**
@@ -121,6 +141,7 @@ final readonly class CheckoutContext implements JsonSerializable
             'driver_type'       => $this->driverType,
             'os'                => $this->os,
             'merchant_order_id' => $this->merchantOrderId,
+            'custom'            => $this->custom,
         ];
     }
 }

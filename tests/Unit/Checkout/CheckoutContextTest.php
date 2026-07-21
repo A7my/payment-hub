@@ -94,6 +94,7 @@ final class CheckoutContextTest extends TestCase
             driverType: 'webview',
             os: 'web',
             merchantOrderId: 'idem-004',
+            custom: ['discount_code' => 'WELCOME10'],
         );
 
         $this->assertSame([
@@ -102,6 +103,43 @@ final class CheckoutContextTest extends TestCase
             'driver_type'       => 'webview',
             'os'                => 'web',
             'merchant_order_id' => 'idem-004',
+            'custom'            => ['discount_code' => 'WELCOME10'],
         ], $context->jsonSerialize());
+    }
+
+    /** @test */
+    public function test_from_transaction_reads_custom_data_captured_via_capturescheckoutcontext(): void
+    {
+        $transaction = new CheckoutTransaction([
+            'driver'             => 'stripe',
+            'driver_type'        => 'webview',
+            'merchant_order_id'  => 'idem-005',
+            'metadata'           => [
+                'os'     => 'web',
+                'custom' => ['discount_code' => 'WELCOME10', 'referrer' => 'affiliate-42'],
+            ],
+        ]);
+
+        $context = CheckoutContext::fromTransaction($transaction);
+
+        $this->assertSame(['discount_code' => 'WELCOME10', 'referrer' => 'affiliate-42'], $context->custom);
+        $this->assertSame('WELCOME10', $context->get('discount_code'));
+        $this->assertNull($context->get('missing_key'));
+        $this->assertSame('fallback', $context->get('missing_key', 'fallback'));
+    }
+
+    /** @test */
+    public function test_from_transaction_defaults_custom_to_an_empty_array_when_absent(): void
+    {
+        $transaction = new CheckoutTransaction([
+            'driver'             => 'stripe',
+            'driver_type'        => 'webview',
+            'merchant_order_id'  => 'idem-006',
+            'metadata'           => ['os' => 'web'],
+        ]);
+
+        $context = CheckoutContext::fromTransaction($transaction);
+
+        $this->assertSame([], $context->custom);
     }
 }
