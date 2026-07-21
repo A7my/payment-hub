@@ -339,6 +339,26 @@ final class StripeClientTest extends TestCase
         ];
     }
 
+    /** @return array{0: string, 1: int, 2: array<int, string>} */
+    private function checkoutSessionWithExpandedPaymentIntentResponse(): array
+    {
+        return [
+            json_encode([
+                'id'             => 'cs_test_lookup_001',
+                'object'         => 'checkout.session',
+                'payment_intent' => [
+                    'id'       => 'pi_test_from_session_001',
+                    'object'   => 'payment_intent',
+                    'status'   => 'succeeded',
+                    'amount'   => 1000,
+                    'currency' => 'usd',
+                ],
+            ], JSON_THROW_ON_ERROR),
+            200,
+            [],
+        ];
+    }
+
     // =========================================================================
     // Options are forwarded unchanged
     // =========================================================================
@@ -727,6 +747,49 @@ final class StripeClientTest extends TestCase
 
         $this->assertSame('pi_test_lookup_001', $raw['id']);
         $this->assertSame('succeeded', $raw['status']);
+    }
+
+    /**
+     * @test
+     *
+     * Regression: the checkout callback route (added after Checkout Sessions
+     * gained a `session_id={CHECKOUT_SESSION_ID}` placeholder in success_url
+     * — see withSessionIdPlaceholder()) hands lookup()/verify() a Checkout
+     * Session id (`cs_...`), not a PaymentIntent id — confirmed via a real
+     * production "No such payment_intent" error when this branch didn't
+     * exist yet. A `cs_...` id must resolve via the Session first.
+     */
+    public function test_retrieve_payment_intent_resolves_a_checkout_session_id_via_its_expanded_payment_intent(): void
+    {
+        $client = new CapturingHttpClient($this->checkoutSessionWithExpandedPaymentIntentResponse());
+        ApiRequestor::setHttpClient($client);
+
+        $raw = (new StripeClient(['secret' => 'sk_test_dummy']))->retrievePaymentIntent(
+            $this->makeLookupRequest('cs_test_lookup_001'),
+        );
+
+        $this->assertStringContainsString('checkout/sessions', $client->urlsSent[0]);
+        $this->assertStringContainsString('cs_test_lookup_001', $client->urlsSent[0]);
+        $this->assertSame(['payment_intent'], $client->paramsSent[0]['expand']);
+
+        // The PaymentIntent embedded in the Session, not the Session itself.
+        $this->assertSame('pi_test_from_session_001', $raw['id']);
+        $this->assertSame('payment_intent', $raw['object']);
+        $this->assertSame('succeeded', $raw['status']);
+    }
+
+    /** @test */
+    public function test_retrieve_payment_intent_with_a_plain_payment_intent_id_never_touches_sessions(): void
+    {
+        $client = new CapturingHttpClient($this->retrievedResponse());
+        ApiRequestor::setHttpClient($client);
+
+        (new StripeClient(['secret' => 'sk_test_dummy']))->retrievePaymentIntent(
+            $this->makeLookupRequest('pi_test_lookup_001'),
+        );
+
+        $this->assertStringContainsString('payment_intents', $client->urlsSent[0]);
+        $this->assertStringNotContainsString('checkout/sessions', $client->urlsSent[0]);
     }
 
     // =========================================================================

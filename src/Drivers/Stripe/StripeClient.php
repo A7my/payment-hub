@@ -423,18 +423,26 @@ final class StripeClient
      * Shared verbatim by both {@see StripeDriver::verify()} and
      * {@see StripeDriver::lookup()} — both need exactly the same data (the
      * base PaymentIntent, whose `status` field is always populated on a
-     * plain retrieve, verified against the SDK). Neither operation requires
-     * an `expand` param: unlike {@see self::createRefund()}, there is no
-     * nested object needed here — Stripe does not attach a signature or
-     * hash to a PaymentIntent to expand and check (that capability, alluded
-     * to generically in {@see \Mifatoyeh\LaravelPaymentFramework\Responses\VerificationResponse}'s
-     * docblock, targets providers that sign redirect parameters; Stripe does
-     * not). The two driver methods differ only in how they INTERPRET this
-     * same raw payload — see {@see StripeMapper::toVerificationResponse()}
-     * vs {@see StripeMapper::toStatusResponse()}.
+     * plain retrieve, verified against the SDK).
      *
-     * Performs no interpretation of the result or of any exception raised —
-     * both are simply propagated to the caller.
+     * ALSO accepts a Checkout Session id (`cs_...`), not just a PaymentIntent
+     * id (`pi_...`) — resolved by retrieving the Session with
+     * `expand: ['payment_intent']` first. This is NOT optional: since
+     * {@see \Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutService}'s
+     * callback route was added, `session_id` (the Checkout Session id
+     * Stripe substitutes into `success_url` via its `{CHECKOUT_SESSION_ID}`
+     * placeholder — see {@see self::withSessionIdPlaceholder()}) is exactly
+     * what arrives back here for a `driver_type: webview` confirmation —
+     * NOT the PaymentIntent id, which is a genuinely different Stripe
+     * object. Calling `paymentIntents->retrieve()` directly with a `cs_...`
+     * id fails with Stripe's own "No such payment_intent" error — confirmed
+     * against real production traffic, not a hypothetical. A `pi_...` id
+     * (e.g. from `driver_type: sdk`'s own `createSdkIntent()` response,
+     * still the normal case for `confirm()`/`VerifyPaymentJob`/the sweep)
+     * continues straight to `paymentIntents->retrieve()`, unchanged.
+     *
+     * Performs no further interpretation of the result or of any exception
+     * raised — both are simply propagated to the caller.
      *
      * @param TransactionLookupRequest $request The lookup/verification request identifying the transaction.
      *
@@ -442,13 +450,35 @@ final class StripeClient
      *
      * @throws \Stripe\Exception\ApiErrorException On any Stripe API error
      *         (e.g. InvalidRequestException — HTTP 404 — for an unknown or
-     *         invalid PaymentIntent id).
+     *         invalid id).
+     * @throws \RuntimeException When a Checkout Session id resolves to no
+     *         PaymentIntent at all (the session exists but nothing was ever
+     *         charged against it).
      */
     public function retrievePaymentIntent(TransactionLookupRequest $request): array
     {
-        $intent = $this->sdk()->paymentIntents->retrieve(
-            $request->transactionId->toString(),
-        );
+        $id = $request->transactionId->toString();
+
+        if (str_starts_with($id, 'cs_')) {
+            $session       = $this->sdk()->checkout->sessions->retrieve($id, ['expand' => ['payment_intent']]);
+            $paymentIntent = $session->payment_intent;
+
+            if ($paymentIntent === null) {
+                throw new \RuntimeException(
+                    "Checkout Session [{$id}] has no associated PaymentIntent — nothing was charged against it yet.",
+                );
+            }
+
+            // Defensive: expand should always return the full object, not a
+            // bare id string, but fall back to a real retrieve if it doesn't.
+            if (is_string($paymentIntent)) {
+                return $this->sdk()->paymentIntents->retrieve($paymentIntent)->toArray();
+            }
+
+            return $paymentIntent->toArray();
+        }
+
+        $intent = $this->sdk()->paymentIntents->retrieve($id);
 
         return $intent->toArray();
     }
