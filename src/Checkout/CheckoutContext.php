@@ -4,7 +4,10 @@ declare(strict_types=1);
 
 namespace Mifatoyeh\LaravelPaymentFramework\Checkout;
 
+use Illuminate\Contracts\Auth\Authenticatable;
+use Illuminate\Support\Facades\Auth;
 use JsonSerializable;
+use Throwable;
 
 /**
  * Everything about HOW a checkout was initiated, passed alongside
@@ -59,6 +62,43 @@ final readonly class CheckoutContext implements JsonSerializable
             os: isset($metadata['os']) ? (string) $metadata['os'] : null,
             merchantOrderId: $transaction->merchant_order_id,
         );
+    }
+
+    /**
+     * Resolve the actual authenticated model `checkout()` captured
+     * `payerId` from — not just the bare id. LAZY: this does a real query,
+     * only when you call it, never eagerly — `onPaymentCompleted()` fires
+     * from webhooks/background jobs as often as real requests, so eagerly
+     * resolving a model on every single confirmation (most of which never
+     * look at `$context->payer()` at all) would be pure waste.
+     *
+     * Resolved through Laravel's own auth guard/provider system
+     * (`Auth::guard($guard)->getProvider()->retrieveById($payerId)`) —
+     * deliberately NOT hardcoded to any specific `User` model class, so
+     * this package never needs to know what your app's Authenticatable
+     * model is. Defaults to `config('auth.defaults.guard')`; pass `$guard`
+     * explicitly if `checkout()` was called behind a different one (e.g.
+     * `payer('api')` if your checkout route uses `auth:api` and that isn't
+     * also your app's default guard).
+     *
+     * Returns `null` when there's no `payerId` at all (unauthenticated
+     * checkout, or persistence disabled), OR when the configured guard's
+     * provider doesn't support `getProvider()`/`retrieveById()` (some
+     * third-party guard packages don't) — this never throws; a missing
+     * payer model is something every caller must already handle regardless
+     * (see `$context->payerId` itself being nullable), same as a missing one.
+     */
+    public function payer(?string $guard = null): ?Authenticatable
+    {
+        if ($this->payerId === null) {
+            return null;
+        }
+
+        try {
+            return Auth::guard($guard)->getProvider()?->retrieveById($this->payerId);
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     /**

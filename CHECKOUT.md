@@ -505,6 +505,27 @@ behalf of. The rest of `$context`: `driver`, `driverType`, `os`,
 (nothing to read them back from), or `payerId` alone is `null` when the
 original checkout request itself was unauthenticated.
 
+Need the actual model, not just the id? `$context->payer()` resolves it —
+lazily (only queries when you call it; most confirmations never need this)
+and through Laravel's own auth guard/provider, so the package never has to
+know your `User` model's class name:
+
+```php
+public function onPaymentCompleted(StatusResponse $status, CheckoutContext $context): void
+{
+    $user = $context->payer(); // ?Authenticatable — a real, queried model, or null
+
+    // Behind a non-default guard (e.g. checkout() runs behind `auth:api`
+    // and that isn't also your app's config('auth.defaults.guard')):
+    $user = $context->payer('api');
+}
+```
+
+Returns `null` — never throws — when there's no `payerId` at all, the id no
+longer resolves to a real row, or the guard's provider doesn't support
+`retrieveById()` (a few third-party guard packages don't). Handle a `null`
+payer the same way you'd handle a missing `payerId`.
+
 **If your model needs `user_id` for anything (creating a related row, an
 authorization check that runs later, etc.), don't put the shared/catalog
 row behind `Payable` at all — put the per-user row behind it instead**, and
