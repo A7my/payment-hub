@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\Schema;
 use Mifatoyeh\LaravelPaymentFramework\Concerns\IsPayable;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Payable;
 use Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutService;
+use Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutContext;
 use Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutTransaction;
 use Mifatoyeh\LaravelPaymentFramework\Checkout\Jobs\VerifyPaymentJob;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\PaymentDriverContract;
@@ -210,7 +211,7 @@ final class VerifyJobTestOrder extends Model implements Payable
         return true;
     }
 
-    public function onPaymentCompleted(StatusResponse $status): void
+    public function onPaymentCompleted(StatusResponse $status, CheckoutContext $context): void
     {
         self::$callbackInvocations[] = $status;
     }

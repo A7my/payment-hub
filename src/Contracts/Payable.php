@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Mifatoyeh\LaravelPaymentFramework\Contracts;
 
 use Illuminate\Contracts\Auth\Authenticatable;
+use Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutContext;
 use Mifatoyeh\LaravelPaymentFramework\Enums\Currency;
 use Mifatoyeh\LaravelPaymentFramework\Responses\StatusResponse;
 use Mifatoyeh\LaravelPaymentFramework\ValueObjects\Money;
@@ -67,14 +68,17 @@ interface Payable
     public function authorizePayment(?Authenticatable $payer): bool;
 
     /**
-     * Called by `CheckoutService::confirm()`/`confirmFromWebhook()` after
-     * authoritatively verifying the payment status directly with the
-     * provider (via `lookup()` — never from a client-supplied claim). Only
-     * called once per confirmation request; a webview/SDK flow that
-     * confirms multiple times (a user double-submitting, a provider webhook
-     * arriving after a client already confirmed) will call this multiple
-     * times too — implementations must be idempotent (e.g. check the model
-     * isn't already marked paid before applying side effects again).
+     * Called after authoritatively verifying the payment status directly
+     * with the provider (via `lookup()` — never from a client-supplied
+     * claim). Fires from five different places — a client `confirm()` call,
+     * the callback route, a webhook, `VerifyPaymentJob`, the reconciliation
+     * sweep — so it must NOT assume an authenticated request/session is
+     * available (see `$context` below). Only called once per confirmation
+     * request; a webview/SDK flow that confirms multiple times (a user
+     * double-submitting, a provider webhook arriving after a client already
+     * confirmed) will call this multiple times too — implementations must
+     * be idempotent (e.g. check the model isn't already marked paid before
+     * applying side effects again).
      *
      * {@see \Mifatoyeh\LaravelPaymentFramework\Concerns\IsPayable} gives
      * this a default no-op body, so models using that trait only need to
@@ -84,7 +88,13 @@ interface Payable
      * {@see \Mifatoyeh\LaravelPaymentFramework\Events\CheckoutPaymentConfirmed}
      * instead — both fire on every confirmation; use whichever fits, or both.
      *
-     * @param StatusResponse $status The authoritative status, straight from the provider.
+     * @param StatusResponse  $status  The authoritative status, straight from the provider.
+     * @param CheckoutContext $context Server-resolved data captured at `checkout()` time —
+     *                                 notably `payerId`, since there is no `auth()->user()`
+     *                                 available here (this method fires from webhooks and
+     *                                 background jobs, not just HTTP requests). See that
+     *                                 class's own docblock for the full field list and why
+     *                                 it's server-resolved-only, never client input.
      */
-    public function onPaymentCompleted(StatusResponse $status): void;
+    public function onPaymentCompleted(StatusResponse $status, CheckoutContext $context): void;
 }

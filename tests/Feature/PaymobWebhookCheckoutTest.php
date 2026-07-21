@@ -10,6 +10,7 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
+use Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutContext;
 use Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutTransaction;
 use Mifatoyeh\LaravelPaymentFramework\Concerns\IsPayable;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Payable;
@@ -287,7 +288,7 @@ final class PaymobWebhookTestOrder extends Model implements Payable
         return $payer !== null && (int) $payer->getAuthIdentifier() === (int) $this->user_id;
     }
 
-    public function onPaymentCompleted(StatusResponse $status): void
+    public function onPaymentCompleted(StatusResponse $status, CheckoutContext $context): void
     {
         self::$callbackInvocations[] = $status;
     }

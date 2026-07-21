@@ -10,10 +10,12 @@ use Illuminate\Database\Eloquent\Model;
 /**
  * Eloquent model for the checkout_transactions table.
  *
- * Written exclusively by {@see CheckoutService::confirm()} (never by
- * `checkout()` — a checkout that hasn't been authoritatively confirmed via
- * `lookup()` has no verified outcome worth persisting). Persistence is
- * gated by `payment.checkout.persist_transactions` (default true); see
+ * Written by {@see CheckoutService::checkout()} (a PENDING row, the moment
+ * a provider order/intent exists) and updated in place by every
+ * confirmation path (`confirm()`, the callback route, a webhook,
+ * `VerifyPaymentJob`, the reconciliation sweep) once the outcome is
+ * authoritatively known. Persistence is gated by
+ * `payment.checkout.persist_transactions` (default true); see
  * {@see CheckoutService::persistTransaction()}.
  *
  * See the migration's docblock for why this is a separate table from the

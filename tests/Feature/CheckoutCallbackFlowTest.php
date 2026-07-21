@@ -8,6 +8,7 @@ use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
+use Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutContext;
 use Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutTransaction;
 use Mifatoyeh\LaravelPaymentFramework\Concerns\IsPayable;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\PaymentDriverContract;
@@ -93,6 +94,7 @@ final class CheckoutCallbackFlowTest extends TestCase
 
         FakeWebviewCallbackDriver::$hookCalls = [];
         CheckoutCallbackTestOrder::$callbackInvocations = [];
+        CheckoutCallbackTestOrder::$contextsReceived    = [];
     }
 
     private function makeOrder(int $amount = 5000, string $currency = 'USD', ?int $userId = 1): CheckoutCallbackTestOrder
@@ -213,6 +215,18 @@ final class CheckoutCallbackFlowTest extends TestCase
         $this->assertCount(1, CheckoutCallbackTestOrder::$callbackInvocations);
         $this->assertSame(PaymentStatus::Captured, CheckoutCallbackTestOrder::$callbackInvocations[0]->getStatus());
 
+        // The whole point of CheckoutContext: the payer id captured back in
+        // the ORIGINAL authenticated checkout() request survives all the
+        // way through to onPaymentCompleted(), even though THIS request
+        // (the provider's own callback) has no authenticated user at all.
+        $this->assertCount(1, CheckoutCallbackTestOrder::$contextsReceived);
+        $context = CheckoutCallbackTestOrder::$contextsReceived[0];
+        $this->assertSame('1', $context->payerId);
+        $this->assertSame('fake_webview', $context->driver);
+        $this->assertSame('webview', $context->driverType);
+        $this->assertSame('web', $context->os);
+        $this->assertSame($pending->merchant_order_id, $context->merchantOrderId);
+
         $pending->refresh();
         $this->assertSame(PaymentStatus::Captured->value, $pending->status);
         $this->assertSame('cs_test_from_provider_001', $pending->transaction_reference);
@@ -273,6 +287,9 @@ final class CheckoutCallbackTestOrder extends Model implements Payable
     /** @var array<int, StatusResponse> */
     public static array $callbackInvocations = [];
 
+    /** @var array<int, CheckoutContext> */
+    public static array $contextsReceived = [];
+
     protected $table = 'checkout_callback_test_orders';
 
     protected $guarded = [];
@@ -287,9 +304,10 @@ final class CheckoutCallbackTestOrder extends Model implements Payable
         return $payer !== null && (int) $payer->getAuthIdentifier() === (int) $this->user_id;
     }
 
-    public function onPaymentCompleted(StatusResponse $status): void
+    public function onPaymentCompleted(StatusResponse $status, CheckoutContext $context): void
     {
         self::$callbackInvocations[] = $status;
+        self::$contextsReceived[]    = $context;
     }
 }
 

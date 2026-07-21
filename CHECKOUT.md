@@ -439,6 +439,7 @@ for free and only need to write this method when you actually have
 per-model logic to run:
 
 ```php
+use Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutContext;
 use Mifatoyeh\LaravelPaymentFramework\Responses\StatusResponse;
 
 class Order extends Model implements Payable
@@ -447,7 +448,7 @@ class Order extends Model implements Payable
 
     // ...getSupportedPaymentDrivers()/authorizePayment() from the README...
 
-    public function onPaymentCompleted(StatusResponse $status): void
+    public function onPaymentCompleted(StatusResponse $status, CheckoutContext $context): void
     {
         if (! $status->isSuccessful() || $status->getStatus() !== PaymentStatus::Captured) {
             return;
@@ -472,6 +473,47 @@ Because `confirm()` can genuinely be called more than once for the same
 transaction (see above), **`onPaymentCompleted()` must be idempotent** —
 check whether the side effect already happened before applying it again, as
 in the `paid_at` example.
+
+#### `$context` — data from the original checkout, since there's no `auth()->user()` here
+
+`onPaymentCompleted()` can fire from five different places — a client
+`confirm()` call, the callback route, a webhook, `VerifyPaymentJob`, the
+reconciliation sweep — and only the FIRST of those (`checkout()` itself)
+ever runs inside a real authenticated HTTP request. By the time any of the
+others fire, there is no session to read `auth()->user()`/`Auth::id()`
+from — calling either inside this method returns `null`, not your user, no
+matter how the request got here. **This is not a bug to work around; it's
+why `$context` exists.**
+
+```php
+public function onPaymentCompleted(StatusResponse $status, CheckoutContext $context): void
+{
+    // ...
+
+    Subscription::where('id', $this->id)->update([
+        'user_id' => $context->payerId, // NOT Auth::id() — no session here
+    ]);
+}
+```
+
+`$context->payerId` is `Authenticatable::getAuthIdentifier()`, captured
+server-side during the ORIGINAL `checkout()` request and carried forward —
+never read from client input, so a request can't spoof who it's paying on
+behalf of. The rest of `$context`: `driver`, `driverType`, `os`,
+`merchantOrderId` (the correlation id `checkout()` generated). `payerId`/
+`os` are `null` when `payment.checkout.persist_transactions` is disabled
+(nothing to read them back from), or `payerId` alone is `null` when the
+original checkout request itself was unauthenticated.
+
+**If your model needs `user_id` for anything (creating a related row, an
+authorization check that runs later, etc.), don't put the shared/catalog
+row behind `Payable` at all — put the per-user row behind it instead**, and
+store the buyer's id on it up front, before checkout starts (e.g. create a
+`pending` `Subscription` row with `user_id` already set, THEN check out
+against that `Subscription`, not the `Package` catalog entry it belongs
+to). `$context->payerId` covers the common case without that restructuring,
+but a model tied to one specific user from creation is still the more
+robust design when you have a choice.
 
 ### App-wide: `CheckoutPaymentConfirmed`
 

@@ -168,6 +168,14 @@ final class CheckoutService
             $os,
             $returnUrl,
             $cancelUrl,
+            // Server-resolved from the CURRENT authenticated request — never
+            // client input. This is the only point in the whole checkout
+            // lifecycle where a real session exists; every later
+            // confirmation path (webhook, callback, background job, sweep)
+            // reads it back from here via CheckoutContext, since none of
+            // them have a session of their own. getAuthIdentifier() (not
+            // ->id) to stay framework-agnostic about what Authenticatable is.
+            $payer?->getAuthIdentifier() !== null ? (string) $payer->getAuthIdentifier() : null,
             // sdk mode's own reference IS the value lookup()/verify() needs
             // later (Stripe's PaymentIntent id stays stable through its
             // lifecycle) — stored immediately so VerifyPaymentJob/the sweep
@@ -396,7 +404,12 @@ final class CheckoutService
      * `onPaymentCompleted()` is called unconditionally, with no `instanceof`
      * check — it's a required method on `Payable` itself (see that
      * interface's own docblock for the "merged from HasPaymentCallback"
-     * history), not an optional capability to detect.
+     * history), not an optional capability to detect. It's passed a
+     * {@see CheckoutContext} alongside the status — built from the just-
+     * persisted row (which carries whatever `checkout()` captured, notably
+     * `payerId`) so every confirmation path, HTTP or not, supplies the same
+     * shape. Falls back to {@see CheckoutContext::withoutTransaction()} when
+     * persistence is disabled — there's no row to build a full context from.
      */
     private function applyConfirmedStatus(
         string $modelType,
@@ -406,9 +419,13 @@ final class CheckoutService
         Payable $model,
         StatusResponse $status,
     ): void {
-        $this->persistTransaction($modelType, $modelId, $driver, $driverType, $model, $status);
+        $transaction = $this->persistTransaction($modelType, $modelId, $driver, $driverType, $model, $status);
 
-        $model->onPaymentCompleted($status);
+        $context = $transaction !== null
+            ? CheckoutContext::fromTransaction($transaction)
+            : CheckoutContext::withoutTransaction($driver, $driverType);
+
+        $model->onPaymentCompleted($status, $context);
 
         $this->events->dispatch(new CheckoutPaymentConfirmed($model, $modelType, $status));
     }
@@ -421,12 +438,14 @@ final class CheckoutService
      * persisted row to correlate it against, an inbound webhook/callback
      * has no way to learn which model it belongs to.
      *
-     * `return_url`/`cancel_url`/`os` are folded into the existing
+     * `return_url`/`cancel_url`/`os`/`payer_id` are folded into the existing
      * `metadata` JSON column rather than given dedicated columns — they're
      * only ever read back by primary-key lookup (never filtered/queried
      * on), so a dedicated column each would just be migration overhead for
-     * no query benefit. {@see CheckoutCallbackController} reads them back
-     * out of `$transaction->metadata` after confirmation.
+     * no query benefit. {@see CheckoutCallbackController} reads
+     * `os`/`return_url`/`cancel_url` back out directly;
+     * {@see CheckoutContext::fromTransaction()} reads all four when building
+     * what {@see Payable::onPaymentCompleted()} receives.
      *
      * Gated by `payment.checkout.persist_transactions` (default true), same
      * as {@see self::persistTransaction()} — see that method's own docblock.
@@ -443,6 +462,7 @@ final class CheckoutService
         string $os,
         ?string $returnUrl,
         ?string $cancelUrl,
+        ?string $payerId,
         ?string $initialTransactionReference,
         Payable $model,
     ): ?CheckoutTransaction {
@@ -469,6 +489,7 @@ final class CheckoutService
                         'os'         => $os,
                         'return_url' => $returnUrl,
                         'cancel_url' => $cancelUrl,
+                        'payer_id'   => $payerId,
                     ],
                 ],
                 static fn (mixed $value): bool => $value !== null,
@@ -500,12 +521,12 @@ final class CheckoutService
         ?string $driverType,
         Payable $model,
         StatusResponse $status,
-    ): void {
+    ): ?CheckoutTransaction {
         if (! config('payment.checkout.persist_transactions', true)) {
-            return;
+            return null;
         }
 
-        CheckoutTransaction::updateOrCreate(
+        return CheckoutTransaction::updateOrCreate(
             ['driver' => $driver, 'model_type' => $modelType, 'model_id' => $modelId],
             array_filter(
                 [

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Mifatoyeh\LaravelPaymentFramework\Concerns;
 
+use Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutContext;
 use Mifatoyeh\LaravelPaymentFramework\Enums\Currency;
 use Mifatoyeh\LaravelPaymentFramework\Responses\StatusResponse;
 use Mifatoyeh\LaravelPaymentFramework\ValueObjects\Money;
@@ -61,7 +62,7 @@ trait IsPayable
         return $value instanceof Currency ? $value : Currency::from(strtoupper((string) $value));
     }
 
-    public function onPaymentCompleted(StatusResponse $status): void
+    public function onPaymentCompleted(StatusResponse $status, CheckoutContext $context): void
     {
         // Intentionally empty — override in the consuming model if it needs to react.
     }
