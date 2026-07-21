@@ -279,9 +279,15 @@ final class CheckoutCallbackFlowTest extends TestCase
 
         $response->assertStatus(200);
         $response->assertJson([
-            'status'         => 'success',
-            'payment_status' => PaymentStatus::Captured->value,
-            'transaction_id' => 'cs_test_mobile_001',
+            'status'            => 'success',
+            'payment_status'    => PaymentStatus::Captured->value,
+            'transaction_id'    => 'cs_test_mobile_001',
+            'driver'            => 'fake_webview',
+            'model_type'        => 'order',
+            'model_id'          => (string) $order->id,
+            'amount'            => 5000, // minor units — makeOrder()'s default
+            'amount_formatted'  => '50.00', // currency-aware: USD, 2 decimals
+            'currency'          => 'USD',
         ]);
     }
 

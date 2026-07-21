@@ -235,9 +235,17 @@ calling `confirm()` itself (which already has these values from its own
   "model_type": "order",
   "model_id": "123",
   "amount": 10000,
+  "amount_formatted": "100.00",
   "currency": "USD"
 }
 ```
+
+`amount` is always in the SMALLEST currency unit — cents/halalas/fils, same
+convention `Money::ofMinor()` uses everywhere in this package and the same
+one Stripe/Paymob's own APIs use (`10000` above is $100.00, not $10,000).
+Use `amount_formatted` if you just want something to display — it's
+currency-aware (`Currency::format()`), so it's correct even for currencies
+that aren't 2-decimal (Japanese Yen has none, Kuwaiti Dinar has three).
 
 ## Automatic confirmation via Paymob's webhook (no frontend call needed)
 

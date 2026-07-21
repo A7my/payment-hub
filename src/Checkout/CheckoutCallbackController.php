@@ -8,6 +8,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controller;
+use Mifatoyeh\LaravelPaymentFramework\Enums\Currency;
 use Mifatoyeh\LaravelPaymentFramework\Exceptions\PaymentException;
 
 /**
@@ -51,13 +52,17 @@ final class CheckoutCallbackController extends Controller
     /**
      * @return JsonResponse For `os: mobile` — everything `confirm()`'s
      *         response already carries, PLUS `driver`/`model_type`/
-     *         `model_id`/`amount`/`currency` off the persisted row, since a
-     *         mobile client landing here from a webview redirect (rather
-     *         than making its own `confirm()` call with those values already
-     *         in hand) is more likely to need them to update its own UI.
-     *         Also returned when nothing could be resolved at all — there's
-     *         no `return_url` to redirect to in that case, so JSON is the
-     *         only option regardless of `os`.
+     *         `model_id`/`amount`/`amount_formatted`/`currency` off the
+     *         persisted row, since a mobile client landing here from a
+     *         webview redirect (rather than making its own `confirm()` call
+     *         with those values already in hand) is more likely to need them
+     *         to update its own UI. `amount` stays in the smallest currency
+     *         unit (this package's convention everywhere); `amount_formatted`
+     *         is the currency-aware human-readable string (`Currency::format()`)
+     *         so the client doesn't need to know each currency's own decimal
+     *         precision. Also returned when nothing could be resolved at
+     *         all — there's no `return_url` to redirect to in that case, so
+     *         JSON is the only option regardless of `os`.
      * @return RedirectResponse For `os: web` — an HTTP redirect to the
      *         `return_url` stored on the pending row at `checkout()` time,
      *         with named query params appended (`checkout_status`,
@@ -87,20 +92,31 @@ final class CheckoutCallbackController extends Controller
         $returnUrl = $metadata['return_url'] ?? null;
 
         if ($os === 'mobile' || ! is_string($returnUrl) || $returnUrl === '') {
+            $currency = Currency::tryFrom($transaction->currency);
+
             return response()->json([
-                'status'         => $transaction->successful ? 'success' : 'fail',
-                'payment_status' => $transaction->status,
-                'transaction_id' => $transaction->transaction_reference,
-                'message'        => $transaction->message,
+                'status'            => $transaction->successful ? 'success' : 'fail',
+                'payment_status'    => $transaction->status,
+                'transaction_id'    => $transaction->transaction_reference,
+                'message'           => $transaction->message,
                 // Beyond confirm()'s own shape — a mobile client landing
                 // here via a webview redirect didn't necessarily keep these
                 // around from the original checkout() response, unlike a
                 // client calling confirm() itself with them already in hand.
-                'driver'         => $transaction->driver,
-                'model_type'     => $transaction->model_type,
-                'model_id'       => $transaction->model_id,
-                'amount'         => $transaction->amount,
-                'currency'       => $transaction->currency,
+                'driver'            => $transaction->driver,
+                'model_type'        => $transaction->model_type,
+                'model_id'          => $transaction->model_id,
+                // `amount` is in the SMALLEST currency unit (halalas/cents —
+                // matches Money::ofMinor()'s convention everywhere else in
+                // this package, and Stripe/Paymob's own API convention) —
+                // `amount_formatted` is the human-readable major-unit string
+                // (currency-aware: correctly "40.00" for SAR, "1050" for
+                // zero-decimal JPY, "1.050" for 3-decimal KWD — see
+                // Currency::format()) so a mobile client doesn't have to
+                // know each currency's decimal precision itself.
+                'amount'            => $transaction->amount,
+                'amount_formatted'  => $currency?->format($transaction->amount),
+                'currency'          => $transaction->currency,
             ]);
         }
 
