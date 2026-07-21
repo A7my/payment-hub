@@ -103,6 +103,7 @@ final class CheckoutControllerTest extends TestCase
             'model_id'    => (string) $order->id,
             'driver'      => 'stripe',
             'driver_type' => 'webview',
+            'os'          => 'web',
             'return_url'  => 'https://example.com/success',
             'cancel_url'  => 'https://example.com/cancel',
         ]);
@@ -127,6 +128,7 @@ final class CheckoutControllerTest extends TestCase
             'model_id'    => '1',
             'driver'      => 'stripe',
             'driver_type' => 'webview',
+            'os'          => 'mobile',
         ]);
 
         $response->assertStatus(422);
@@ -143,6 +145,7 @@ final class CheckoutControllerTest extends TestCase
             'model_id'    => '999999',
             'driver'      => 'stripe',
             'driver_type' => 'webview',
+            'os'          => 'mobile',
         ]);
 
         $response->assertStatus(404);
@@ -163,6 +166,7 @@ final class CheckoutControllerTest extends TestCase
             'model_id'    => (string) $order->id,
             'driver'      => 'paypal', // CheckoutTestOrder only allows 'stripe'
             'driver_type' => 'webview',
+            'os'          => 'mobile',
         ]);
 
         $response->assertStatus(422);
@@ -186,6 +190,7 @@ final class CheckoutControllerTest extends TestCase
             'model_id'    => (string) $order->id,
             'driver'      => 'stripe',
             'driver_type' => 'webview',
+            'os'          => 'mobile',
         ]);
 
         $response->assertStatus(403);
@@ -203,6 +208,7 @@ final class CheckoutControllerTest extends TestCase
             'model_id'    => (string) $order->id,
             'driver'      => 'stripe',
             'driver_type' => 'webview',
+            'os'          => 'mobile',
         ]);
 
         $response->assertStatus(403);
@@ -223,6 +229,7 @@ final class CheckoutControllerTest extends TestCase
             'model_id'    => (string) $order->id,
             'driver'      => 'stripe',
             'driver_type' => 'sdk',
+            'os'          => 'mobile',
         ]);
 
         $response->assertStatus(422);

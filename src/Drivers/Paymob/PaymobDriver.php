@@ -9,6 +9,7 @@ use InvalidArgumentException;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\PaymentDriverContract;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\SupportsCapabilities;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\SupportsSdkCheckout;
+use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\SupportsTrustedWebhookStatus;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Logging\PaymentLoggerContract;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Services\RetryServiceContract;
 use Mifatoyeh\LaravelPaymentFramework\DTO\CancelSubscriptionRequest;
@@ -97,7 +98,7 @@ use Throwable;
  * fake one. `processWebhook()`/`verifyWebhookSignature()` are `// TODO`
  * stubs, deferred per explicit instruction (same status as Stripe's).
  */
-final class PaymobDriver extends AbstractDriver implements PaymentDriverContract, SupportsCapabilities, SupportsSdkCheckout
+final class PaymobDriver extends AbstractDriver implements PaymentDriverContract, SupportsCapabilities, SupportsSdkCheckout, SupportsTrustedWebhookStatus
 {
     private readonly PaymobClient $client;
 
@@ -763,9 +764,8 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
      */
     public function processWebhook(WebhookRequest $request): WebhookResponse
     {
-        $normalized = $this->unflattenWebhookPayload($request->metadata);
-        $status     = $this->mapper->toStatusResponse($normalized);
-        $eventType  = $this->webhookEventTypeFor($status->getStatus());
+        $status    = $this->statusFromFlatPayload($request->metadata);
+        $eventType = $this->webhookEventTypeFor($status->getStatus());
 
         $this->logInfo('Webhook processed', $this->buildLogContext('processWebhook', [
             'event_type' => $eventType->value,
@@ -795,6 +795,57 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
         $providedHmac = (string) ($request->metadata['hmac'] ?? '');
 
         return $this->webhookVerifier->verify($request->metadata, $providedHmac);
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * KSA mode ONLY: Paymob's KSA (Intention API) platform has no confirmed
+     * working equivalent of {@see self::retrieveTransaction()}'s legacy
+     * endpoint — `lookup()` calling it there produced a live HTTP 401
+     * ("Authentication credentials were not provided.") immediately after
+     * the `/api`-suffix bug fix removed the previous 404, strongly
+     * suggesting that whole legacy `/acceptance/*` path simply isn't a real
+     * KSA endpoint (a 401 from a gateway route that doesn't actually accept
+     * this auth scheme, not a genuine credentials problem). Rather than
+     * `lookup()` permanently failing for every KSA webhook, this returns
+     * the SAME {@see StatusResponse} {@see self::processWebhook()} would
+     * build — trusting the webhook payload directly, since its HMAC
+     * signature (verified before this is ever reached — see
+     * {@see SupportsTrustedWebhookStatus}'s own docblock) already
+     * establishes it's genuinely from Paymob.
+     *
+     * Egypt/Accept mode returns `null` — {@see self::retrieveTransaction()}
+     * is confirmed working there, so `CheckoutService::confirmFromWebhook()`
+     * falls back to the normal `lookup()`-based re-verification.
+     *
+     * UNVERIFIED: if Paymob's real KSA lookup endpoint is ever confirmed
+     * (their own docs/support, or a live Postman collection), prefer fixing
+     * {@see self::retrieveTransaction()} for KSA mode over relying on this
+     * permanently — a live re-check is strictly stronger than trusting a
+     * single webhook delivery.
+     */
+    public function statusFromWebhookPayload(array $rawPayload): ?StatusResponse
+    {
+        if (! $this->client->isKsaMode()) {
+            return null;
+        }
+
+        return $this->statusFromFlatPayload($rawPayload);
+    }
+
+    /**
+     * Shared by {@see self::processWebhook()} and
+     * {@see self::statusFromWebhookPayload()} — un-flattens the payload and
+     * maps it via {@see PaymobMapper::toStatusResponse()}, the same
+     * translation {@see self::lookup()} uses for a live `retrieveTransaction()`
+     * response.
+     *
+     * @param array<string, mixed> $flat
+     */
+    private function statusFromFlatPayload(array $flat): StatusResponse
+    {
+        return $this->mapper->toStatusResponse($this->unflattenWebhookPayload($flat));
     }
 
     /**

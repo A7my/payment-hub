@@ -211,13 +211,68 @@ return [
         'route'      => env('PAYMENT_CHECKOUT_ROUTE', 'payment/checkout'),
         'middleware' => ['web', 'auth'],
 
-        // When true, CheckoutService::confirm() persists a checkout_transactions
-        // row for every authoritatively-verified payment. Requires the migration:
+        // Middleware for the auto-registered callback route
+        // ({route}/callback/{driver} — see routes/callback.php). Deliberately
+        // separate from `middleware` above and deliberately light by default:
+        // the caller is a payment provider's redirect/server, never your
+        // logged-in user, so 'auth' doesn't apply — and 'web'-group CSRF
+        // would reject a provider's POST outright.
+        'callback_middleware' => [],
+
+        // When true, CheckoutService persists a checkout_transactions row for
+        // every checkout attempt (pending at checkout() time) and every
+        // authoritatively-verified confirmation. Requires the migration:
         //   php artisan vendor:publish --tag=payment-migrations
         //   php artisan migrate
         // Set to false if you haven't run that migration yet, or you handle
         // your own persistence via Payable::onPaymentCompleted()/CheckoutPaymentConfirmed.
+        // NOTE: the callback/webhook confirmation mechanism and the
+        // reconciliation sweep below both REQUIRE this to be true — there is
+        // no way to correlate an inbound callback/webhook to a model without
+        // a persisted row.
         'persist_transactions' => env('PAYMENT_CHECKOUT_PERSIST_TRANSACTIONS', true),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Payment Verification
+    |--------------------------------------------------------------------------
+    |
+    | Backstops for confirming a checkout's outcome when nothing (a webview
+    | redirect, a webhook) proactively resolves it:
+    |
+    | - `job`: for `driver_type: sdk` checkouts against a driver where
+    |   supports('webhook') is false — see
+    |   CheckoutService::driverSupportsWebhook(). A self-rescheduling
+    |   VerifyPaymentJob actively re-checks status with the configured
+    |   backoff, up to max_attempts or max_duration, whichever comes first.
+    |   Requires a queue driver that supports delayed dispatch
+    |   (redis/database/sqs) — QUEUE_CONNECTION=sync makes every attempt run
+    |   immediately back-to-back, defeating the backoff entirely.
+    |
+    | - `sweep_interval_hours`: the universal backstop, regardless of driver
+    |   or driver_type — a scheduled command re-verifies any
+    |   checkout_transactions row still "pending" and older than this many
+    |   hours. Catches a webhook that was supposed to arrive but didn't
+    |   (provider-side outage, misconfigured dashboard URL, dropped
+    |   delivery) AND a VerifyPaymentJob chain lost to a worker crash or
+    |   queue flush — the sweep doesn't care which path was supposed to
+    |   resolve a row, only that it didn't.
+    |
+    */
+    'verification' => [
+        'sweep_interval_hours' => (int) env('PAYMENT_SWEEP_INTERVAL_HOURS', 12),
+
+        'job' => [
+            // Seconds between VerifyPaymentJob attempts: 30s, 1m, 5m, 15m, 1h.
+            // The last value repeats for any attempt beyond the list length.
+            'backoff'      => [30, 60, 300, 900, 3600],
+            'max_attempts' => (int) env('PAYMENT_VERIFY_JOB_MAX_ATTEMPTS', 8),
+            // Seconds — 24h. Whichever of max_attempts/max_duration is hit
+            // first stops the job chain; the sweep above remains as the
+            // unconditional final backstop either way.
+            'max_duration' => (int) env('PAYMENT_VERIFY_JOB_MAX_DURATION', 86400),
+        ],
     ],
 
     /*

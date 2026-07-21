@@ -6,6 +6,7 @@ namespace Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe;
 
 use Illuminate\Contracts\Events\Dispatcher;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\PaymentDriverContract;
+use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\SupportsCapabilities;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\SupportsSdkCheckout;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Logging\PaymentLoggerContract;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Services\RetryServiceContract;
@@ -84,7 +85,7 @@ use Throwable;
  * are fully implemented. Every other method body is intentionally left as a
  * `// TODO` stub, to be implemented in a later task.
  */
-final class StripeDriver extends AbstractDriver implements PaymentDriverContract, SupportsSdkCheckout
+final class StripeDriver extends AbstractDriver implements PaymentDriverContract, SupportsSdkCheckout, SupportsCapabilities
 {
     private readonly StripeClient $client;
 
@@ -115,6 +116,24 @@ final class StripeDriver extends AbstractDriver implements PaymentDriverContract
         $this->mapper          = new StripeMapper();
         $this->webhookVerifier = new StripeWebhookVerifier($config);
         $this->exceptionMapper = new StripeExceptionMapper();
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * Explicit about `'webhook'` specifically — {@see SupportsCapabilities}'s
+     * own docblock says a driver that doesn't implement this interface is
+     * ASSUMED to support everything, which would be actively wrong here:
+     * {@see self::processWebhook()}/{@see self::verifyWebhookSignature()}
+     * are still `// TODO` stubs. Rather than rely on that default (silently
+     * telling `CheckoutService`'s webhook-vs-job dispatch decision that
+     * Stripe webhooks work when they don't), Stripe now implements this
+     * interface explicitly, same as {@see \Mifatoyeh\LaravelPaymentFramework\Drivers\Paymob\PaymobDriver}
+     * already does — everything except `'webhook'` is supported.
+     */
+    public function supports(string $capability): bool
+    {
+        return $capability !== 'webhook';
     }
 
     /**

@@ -126,6 +126,7 @@ final class CheckoutSdkConfirmTest extends TestCase
             'model_id'    => (string) $order->id,
             'driver'      => 'fake_sdk',
             'driver_type' => 'sdk',
+            'os'          => 'mobile',
         ]);
 
         $response->assertStatus(200);

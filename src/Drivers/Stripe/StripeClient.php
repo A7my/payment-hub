@@ -700,7 +700,7 @@ final class StripeClient
             array_filter(
                 [
                     'mode'           => 'payment',
-                    'success_url'    => $request->returnUrl,
+                    'success_url'    => $this->withSessionIdPlaceholder($request->returnUrl),
                     'cancel_url'     => $request->cancelUrl,
                     'customer_email' => $request->customer?->email,
                     'expires_at'     => $request->expiresAt?->getTimestamp(),
@@ -722,6 +722,34 @@ final class StripeClient
         );
 
         return $session->toArray();
+    }
+
+    /**
+     * Append Stripe's `{CHECKOUT_SESSION_ID}` template placeholder to a
+     * success URL as a `session_id` query param, unless one is already
+     * present — Stripe substitutes it with the real session id (`cs_...`)
+     * on redirect. Verified against the SDK's own documented convention for
+     * `success_url`; unconditional (not just for the package's own checkout
+     * endpoint) because ANY caller of `createPaymentLink()` benefits from
+     * being able to identify which session a customer returned from,
+     * exactly as Stripe's own docs recommend doing — this is not specific
+     * to {@see \Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutService}'s
+     * callback route.
+     *
+     * A bare `null` `$url` is returned as-is — `success_url` being absent
+     * is {@see StripeDriver::createPaymentLink()}'s guard to enforce, not
+     * this method's (see {@see self::createCheckoutSession()}'s own
+     * docblock — "this client method itself performs no validation").
+     */
+    private function withSessionIdPlaceholder(?string $url): ?string
+    {
+        if ($url === null || str_contains($url, 'session_id=')) {
+            return $url;
+        }
+
+        $separator = str_contains($url, '?') ? '&' : '?';
+
+        return $url . $separator . 'session_id={CHECKOUT_SESSION_ID}';
     }
 
     /**

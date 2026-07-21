@@ -1141,8 +1141,30 @@ final class StripeClientTest extends TestCase
 
         (new StripeClient(['secret' => 'sk_test_dummy']))->createCheckoutSession($this->makePaymentLinkRequest());
 
-        $this->assertSame('https://example.com/success', $client->paramsSent[0]['success_url']);
+        // success_url gets Stripe's {CHECKOUT_SESSION_ID} placeholder appended
+        // (see StripeClient::withSessionIdPlaceholder()) so a caller can
+        // identify which session a customer returned from — verified
+        // against Stripe's own documented success_url convention.
+        $this->assertSame(
+            'https://example.com/success?session_id={CHECKOUT_SESSION_ID}',
+            $client->paramsSent[0]['success_url'],
+        );
         $this->assertSame('https://example.com/cancel', $client->paramsSent[0]['cancel_url']);
+    }
+
+    /** @test */
+    public function test_create_checkout_session_does_not_duplicate_an_existing_session_id_param(): void
+    {
+        $client = new CapturingHttpClient($this->checkoutSessionResponse());
+        ApiRequestor::setHttpClient($client);
+
+        $request = $this->makePaymentLinkRequest(returnUrl: 'https://example.com/success?session_id={CHECKOUT_SESSION_ID}');
+        (new StripeClient(['secret' => 'sk_test_dummy']))->createCheckoutSession($request);
+
+        $this->assertSame(
+            'https://example.com/success?session_id={CHECKOUT_SESSION_ID}',
+            $client->paramsSent[0]['success_url'],
+        );
     }
 
     /** @test */

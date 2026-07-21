@@ -189,6 +189,7 @@ final class PaymobWebhookCheckoutTest extends TestCase
             'model_id'    => (string) $order->id,
             'driver'      => 'paymob',
             'driver_type' => 'webview',
+            'os'          => 'mobile',
         ]);
         $checkoutResponse->assertStatus(200);
 
@@ -233,6 +234,7 @@ final class PaymobWebhookCheckoutTest extends TestCase
             'model_id'    => (string) $order->id,
             'driver'      => 'paymob',
             'driver_type' => 'webview',
+            'os'          => 'mobile',
         ])->assertStatus(200);
 
         $pending = CheckoutTransaction::query()->where('model_type', 'order')->where('model_id', (string) $order->id)->first();

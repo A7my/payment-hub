@@ -82,4 +82,18 @@ final class CheckoutException extends PaymentException
             422,
         );
     }
+
+    public static function unsupportedOs(string $os): self
+    {
+        return new self("os [{$os}] must be one of: web, mobile.", 422);
+    }
+
+    public static function returnUrlRequiredForWebviewWeb(): self
+    {
+        return new self(
+            'return_url is required when driver_type is "webview" and os is "web" — the package redirects ' .
+            'the customer\'s browser back to it once the payment callback has been verified.',
+            422,
+        );
+    }
 }

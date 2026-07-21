@@ -357,6 +357,7 @@ POST /payment/checkout
   "model_id": "123",
   "driver": "stripe",
   "driver_type": "webview",
+  "os": "web",
   "return_url": "https://example.com/success",
   "cancel_url": "https://example.com/cancel"
 }
@@ -365,8 +366,9 @@ POST /payment/checkout
 - **`model_type`** — the key you used in `payment.payables` (`"order"` above), not a class name.
 - **`model_id`** — the record's primary key.
 - **`driver`** — `"stripe"`, `"paymob"`, etc. — must also be in that model's own `getSupportedPaymentDrivers()`.
-- **`driver_type`** — `"webview"` (redirects to a hosted checkout page, same as `createPaymentLink()`) or `"sdk"` (returns a client-confirmable reference for a native/client-side SDK instead — a driver that doesn't support it yet returns a clear 422, not a silent wrong response). See [`CHECKOUT.md`](CHECKOUT.md) for the full sdk-mode walkthrough, the required `POST {route}/confirm` step, per-model payment callbacks, and transaction persistence — none of that is duplicated here.
-- **`return_url`/`cancel_url`** — forwarded straight through to the driver's `createPaymentLink()` (webview mode only).
+- **`driver_type`** — `"webview"` (redirects to a hosted checkout page, same as `createPaymentLink()`) or `"sdk"` (returns a client-confirmable reference for a native/client-side SDK instead — a driver that doesn't support it yet returns a clear 422, not a silent wrong response). See [`CHECKOUT.md`](CHECKOUT.md) for the full sdk-mode walkthrough, per-model/per-driver payment callbacks, background verification, and transaction persistence — none of that is duplicated here.
+- **`os`** — `"web"` or `"mobile"`, required. Decides how you eventually learn the outcome — see [`CHECKOUT.md`](CHECKOUT.md#webview--os-web-the-auto-registered-callback-route) for the one combination (`webview` + `web`) where this package handles the entire round trip (including redirecting the browser back to `return_url`) with no `confirm()` call needed from you at all.
+- **`return_url`/`cancel_url`** — for `webview` + `os: "web"`, `return_url` is **required** and is where the browser lands *after* this package has verified the outcome (not forwarded to the provider directly — see CHECKOUT.md). For every other combination, both remain optional and, when present, are forwarded straight through to the driver's `createPaymentLink()`.
 
 Success response (HTTP 200, webview mode):
 

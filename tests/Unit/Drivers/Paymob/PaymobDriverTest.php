@@ -596,6 +596,48 @@ final class PaymobDriverTest extends TestCase
         $this->assertTrue($response->isSuccessful()); // parsed fine — just an unrecognised event type
     }
 
+    /**
+     * @test
+     *
+     * Egypt mode: retrieveTransaction() is confirmed working, so
+     * statusFromWebhookPayload() defers to it by returning null —
+     * CheckoutService::confirmFromWebhook() falls back to a live lookup().
+     */
+    public function test_status_from_webhook_payload_returns_null_in_egypt_mode(): void
+    {
+        $status = $this->makeDriver()->statusFromWebhookPayload($this->makeWebhookPayload());
+
+        $this->assertNull($status);
+    }
+
+    /**
+     * @test
+     *
+     * KSA mode: no HTTP call is made at all — the status comes straight
+     * from the (already HMAC-verified, by the time this is called for
+     * real) webhook payload. See SupportsTrustedWebhookStatus's docblock
+     * for why.
+     */
+    public function test_status_from_webhook_payload_returns_a_status_in_ksa_mode(): void
+    {
+        $driver = $this->makeKsaDriver();
+        $status = $driver->statusFromWebhookPayload($this->makeWebhookPayload());
+
+        $this->assertNotNull($status);
+        $this->assertSame(PaymentStatus::Captured, $status->getStatus());
+        $this->assertSame('7773107', $status->getTransactionId()->toString());
+    }
+
+    /** @test */
+    public function test_status_from_webhook_payload_reflects_a_failed_transaction_in_ksa_mode(): void
+    {
+        $driver = $this->makeKsaDriver();
+        $status = $driver->statusFromWebhookPayload($this->makeWebhookPayload(['success' => 'false']));
+
+        $this->assertNotNull($status);
+        $this->assertSame(PaymentStatus::Failed, $status->getStatus());
+    }
+
     // =========================================================================
     // Subscriptions — genuinely unsupported, not faked
     // =========================================================================

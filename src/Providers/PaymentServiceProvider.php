@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace Mifatoyeh\LaravelPaymentFramework\Providers;
 
+use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Support\ServiceProvider;
 use Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutService;
+use Mifatoyeh\LaravelPaymentFramework\Console\Commands\ReconcilePendingCheckoutsCommand;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Currency\CurrencyConverterContract;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Logging\PaymentLoggerContract;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Repositories\PaymentTransactionRepositoryContract;
@@ -135,6 +137,11 @@ class PaymentServiceProvider extends ServiceProvider
         // its own path/middleware from config.
         if (config('payment.checkout.enabled', true)) {
             $this->loadRoutesFrom(__DIR__ . '/../../routes/checkout.php');
+
+            // The per-driver callback route ({route}/callback/{driver}) —
+            // same enabled flag as the checkout route itself, since it only
+            // exists to serve checkout()'s own webview flow.
+            $this->loadRoutesFrom(__DIR__ . '/../../routes/callback.php');
         }
 
         // Bridge inbound provider webhooks to the checkout confirmation flow
@@ -169,7 +176,7 @@ class PaymentServiceProvider extends ServiceProvider
         //           );
         //       }
 
-        // Publish configuration
+        // Publish configuration, register the reconciliation sweep command
         if ($this->app->runningInConsole()) {
             $this->publishes([
                 __DIR__ . '/../../config/payment.php' => config_path('payment.php'),
@@ -178,6 +185,40 @@ class PaymentServiceProvider extends ServiceProvider
             $this->publishes([
                 __DIR__ . '/../../database/migrations/' => database_path('migrations'),
             ], 'payment-migrations');
+
+            $this->commands([ReconcilePendingCheckoutsCommand::class]);
+        }
+
+        // Schedule the universal reconciliation sweep — every
+        // payment.verification.sweep_interval_hours (default 12h),
+        // regardless of driver/driver_type/os; see that command's own
+        // docblock for why it exists alongside the webhook/callback/job
+        // paths rather than instead of them. Scheduled from booted() so the
+        // host app's own Schedule instance (and its own scheduled tasks)
+        // are fully registered first.
+        $this->app->booted(function (): void {
+            $schedule = $this->app->make(Schedule::class);
+            $hours    = max(1, (int) config('payment.verification.sweep_interval_hours', 12));
+
+            $schedule->command(ReconcilePendingCheckoutsCommand::class)
+                ->cron("0 */{$hours} * * *")
+                ->name('payment:reconcile-checkouts')
+                ->onOneServer();
+        });
+
+        // VerifyPaymentJob (dispatched for `driver_type: sdk` checkouts
+        // against a driver without webhook support — see
+        // CheckoutService::driverSupportsWebhook()) relies on ->delay()
+        // actually delaying. QUEUE_CONNECTION=sync runs every job
+        // synchronously and immediately, so every backoff attempt fires
+        // back-to-back instead of waiting — warn rather than fail silently.
+        if (config('queue.default') === 'sync') {
+            $this->app->make(PaymentLoggerContract::class)->warning(
+                'payment: QUEUE_CONNECTION is "sync" — VerifyPaymentJob (sdk-mode checkouts against a ' .
+                'driver without webhook support) will run its entire backoff schedule immediately and ' .
+                'back-to-back instead of actually waiting between attempts. Use a delay-capable queue ' .
+                'driver (redis, database, sqs) in production.',
+            );
         }
     }
 }

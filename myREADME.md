@@ -1,4 +1,4 @@
-### 0.AT composer.json add
+### AT composer.json add
 
 ```php
     "repositories": [
@@ -148,7 +148,6 @@ class User extends Authenticatable implements JWTSubject, Payable
     'enabled'    => env('PAYMENT_CHECKOUT_ENABLED', true),
     'route'      => env('PAYMENT_CHECKOUT_ROUTE', 'payment/checkout'), // you can change the route here.
     'middleware' => ['api', 'auth:api'],
-
 ],
 ```
 

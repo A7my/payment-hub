@@ -42,7 +42,16 @@ final class CheckoutController extends Controller
      * `checkout_url` to redirect the customer to; `sdk` returns a
      * `client_secret`/`publishable_key` pair for a native client-side SDK to
      * confirm the charge itself. Either way, the actual outcome is not yet
-     * known here — the client must call {@see self::confirm()} afterwards.
+     * known here.
+     *
+     * `os` decides how confirmation eventually reaches the client — see
+     * {@see CheckoutService::checkout()}'s own docblock:
+     *   - `driver_type: webview` + `os: web` — the provider redirects to the
+     *     package's own callback route, verifies, then redirects again to
+     *     `return_url` (required for this combination specifically — see
+     *     {@see \Mifatoyeh\LaravelPaymentFramework\Exceptions\CheckoutException::returnUrlRequiredForWebviewWeb()}).
+     *   - Every other combination: unchanged — the client still calls
+     *     {@see self::confirm()} itself, or waits on a webhook/background job.
      *
      * @return JsonResponse HTTP 200 on success; 4xx/5xx per
      *         {@see CheckoutException::getStatusCode()} on any rejectable
@@ -56,6 +65,7 @@ final class CheckoutController extends Controller
             'model_id'    => ['required', 'string'],
             'driver'      => ['required', 'string'],
             'driver_type' => ['required', 'string', 'in:sdk,webview'],
+            'os'          => ['required', 'string', 'in:web,mobile'],
             'return_url'  => ['nullable', 'string'],
             'cancel_url'  => ['nullable', 'string'],
         ]);
@@ -66,6 +76,7 @@ final class CheckoutController extends Controller
                 modelId: $validated['model_id'],
                 driver: $validated['driver'],
                 driverType: $validated['driver_type'],
+                os: $validated['os'],
                 returnUrl: $validated['return_url'] ?? null,
                 cancelUrl: $validated['cancel_url'] ?? null,
                 payer: $request->user(),
