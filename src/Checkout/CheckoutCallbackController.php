@@ -16,14 +16,20 @@ use Mifatoyeh\LaravelPaymentFramework\Exceptions\PaymentException;
  *
  * This is where a provider's hosted-checkout redirect lands — CURRENTLY
  * only meaningfully reachable for Stripe: {@see CheckoutService::checkout()}
- * rewrites `success_url` to point here (for `driver_type: webview` +
- * `os: web` only), and Stripe genuinely supports a dynamic, per-session
- * redirect target. Paymob does not (see
+ * rewrites `success_url` to point here for EVERY `driver_type: webview`
+ * checkout, both `os` values, and Stripe genuinely supports a dynamic,
+ * per-session redirect target. Paymob does not (see
  * {@see \Mifatoyeh\LaravelPaymentFramework\Drivers\Paymob\PaymobDriver}'s
  * class docblock) — its redirect target is fixed in the Paymob dashboard,
  * so in practice its existing webhook route
  * (`routes/webhooks.php` → `payment/webhook/paymob`) already IS its
  * callback route; nothing here changes that.
+ *
+ * `os` decides the response shape, not whether this route is reached at
+ * all: `web` redirects the browser to `return_url` afterward; `mobile` gets
+ * a plain JSON response instead — there's no browser to redirect, and a
+ * mobile client calling this as an API is a more natural fit than parsing
+ * query params off a redirect it can't easily follow.
  *
  * Deliberately thin — all resolution/verification/persistence logic lives
  * in {@see CheckoutService::resolveAndConfirm()}, same split as
@@ -43,10 +49,15 @@ final class CheckoutCallbackController extends Controller
     }
 
     /**
-     * @return JsonResponse For `os: mobile` (reuses `confirm()`'s response
-     *         shape exactly), or when nothing could be resolved at all —
-     *         there's no `return_url` to redirect to in that case, so JSON
-     *         is the only option regardless of `os`.
+     * @return JsonResponse For `os: mobile` — everything `confirm()`'s
+     *         response already carries, PLUS `driver`/`model_type`/
+     *         `model_id`/`amount`/`currency` off the persisted row, since a
+     *         mobile client landing here from a webview redirect (rather
+     *         than making its own `confirm()` call with those values already
+     *         in hand) is more likely to need them to update its own UI.
+     *         Also returned when nothing could be resolved at all — there's
+     *         no `return_url` to redirect to in that case, so JSON is the
+     *         only option regardless of `os`.
      * @return RedirectResponse For `os: web` — an HTTP redirect to the
      *         `return_url` stored on the pending row at `checkout()` time,
      *         with named query params appended (`checkout_status`,
@@ -81,6 +92,15 @@ final class CheckoutCallbackController extends Controller
                 'payment_status' => $transaction->status,
                 'transaction_id' => $transaction->transaction_reference,
                 'message'        => $transaction->message,
+                // Beyond confirm()'s own shape — a mobile client landing
+                // here via a webview redirect didn't necessarily keep these
+                // around from the original checkout() response, unlike a
+                // client calling confirm() itself with them already in hand.
+                'driver'         => $transaction->driver,
+                'model_type'     => $transaction->model_type,
+                'model_id'       => $transaction->model_id,
+                'amount'         => $transaction->amount,
+                'currency'       => $transaction->currency,
             ]);
         }
 

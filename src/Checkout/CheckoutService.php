@@ -41,9 +41,10 @@ use Mifatoyeh\LaravelPaymentFramework\ValueObjects\TransactionId;
  * ({@see self::applyConfirmedStatus()}, reached via
  * {@see self::confirmTransaction()}):
  *   - `checkout()` — starts a payment, records a PENDING
- *     {@see CheckoutTransaction} row, and for `webview`+`os: web` rewrites
- *     the driver-facing return URL to the package's own auto-registered
- *     callback route (see {@see self::buildCallbackUrl()}).
+ *     {@see CheckoutTransaction} row, and for every `driver_type: webview`
+ *     checkout (both `os` values) rewrites the driver-facing return URL to
+ *     the package's own auto-registered callback route (see
+ *     {@see self::buildCallbackUrl()}).
  *   - `confirm()` — authoritative verification on a CLIENT's request.
  *   - `resolveAndConfirm()` — the same, triggered by an inbound provider
  *     callback/webhook instead of a client request (no `$payer` to
@@ -83,18 +84,33 @@ final class CheckoutService
             throw CheckoutException::unsupportedOs($os);
         }
 
-        // Only THIS combination redirects through the package's own callback
-        // route (see buildCallbackUrl()) before landing anywhere — it's the
-        // only combination that currently NEEDS return_url at all:
-        //   - webview + mobile: out of scope for the callback route for now
-        //     (still passes return_url straight to the driver, unchanged
-        //     from prior behaviour).
-        //   - sdk (either os): no server-side redirect happens at all — the
-        //     client SDK confirms in place; confirmation arrives via webhook
-        //     or VerifyPaymentJob, never a browser redirect.
-        $isWebviewWeb = $driverType === 'webview' && $os === 'web';
+        // EVERY webview checkout redirects through the package's own
+        // callback route (see buildCallbackUrl()) before landing anywhere —
+        // `os` only decides what CheckoutCallbackController does once it
+        // gets there (redirect to return_url for `web`, plain JSON for
+        // `mobile` — see that class's own docblock). `sdk` mode is
+        // unaffected either way: no server-side redirect happens at all,
+        // the client SDK confirms in place, and confirmation arrives via
+        // webhook or VerifyPaymentJob instead.
+        //
+        // Routing `webview`+`mobile` through here too (not just `web`) was
+        // a real, live gap until fixed: without it, `$returnUrl` passed
+        // straight through unchanged to the driver — StripeClient::createCheckoutSession()
+        // via StripeDriver::createPaymentLink() REQUIRES a non-empty
+        // success_url unconditionally (Stripe's own API requirement, not
+        // os-dependent), so a mobile checkout with no return_url would
+        // throw outright; WITH one, Stripe would redirect straight to it,
+        // completely bypassing this package's verification. Routing through
+        // the callback fixes both: the URL handed to the driver is always
+        // server-generated (never empty), and verification always happens
+        // before the mobile client sees a result either way.
+        $isWebview = $driverType === 'webview';
 
-        if ($isWebviewWeb && ($returnUrl === null || $returnUrl === '')) {
+        // return_url itself is only REQUIRED for `web` specifically — that's
+        // the only os where CheckoutCallbackController needs somewhere to
+        // redirect the browser to afterward. `mobile` gets a JSON response
+        // instead (no redirect target needed); return_url stays optional there.
+        if ($isWebview && $os === 'web' && ($returnUrl === null || $returnUrl === '')) {
             throw CheckoutException::returnUrlRequiredForWebviewWeb();
         }
 
@@ -124,13 +140,16 @@ final class CheckoutService
             currency: $model->getPaymentCurrency(),
             description: class_basename($model) . ' #' . $model->getKey(),
             customer: null,
-            // webview+web: the DRIVER redirects here first (see buildCallbackUrl()'s
-            // own docblock) — the customer's own return_url is stored on the
-            // pending row instead (see createPendingTransaction()) and used
-            // by CheckoutCallbackController AFTER verification, never handed
-            // to the provider directly. Every other combination is
-            // unaffected — $returnUrl passes straight through, same as before.
-            returnUrl: $isWebviewWeb ? $this->buildCallbackUrl($driver, $idempotencyKey) : $returnUrl,
+            // Every webview checkout (both os values): the DRIVER redirects
+            // here first (see buildCallbackUrl()'s own docblock) — the
+            // customer's own return_url is stored on the pending row instead
+            // (see createPendingTransaction()) and used by
+            // CheckoutCallbackController AFTER verification (to redirect for
+            // `web`, or just to know it's available for `mobile`), never
+            // handed to the provider directly. `sdk` mode is unaffected —
+            // $returnUrl passes straight through, same as before (irrelevant
+            // there regardless, since createSdkIntent() doesn't use it).
+            returnUrl: $isWebview ? $this->buildCallbackUrl($driver, $idempotencyKey) : $returnUrl,
             cancelUrl: $cancelUrl,
             expiresAt: null,
             idempotencyKey: $idempotencyKey,
@@ -555,7 +574,7 @@ final class CheckoutService
     }
 
     /**
-     * Build the URL a `webview`+`os: web` checkout hands to the DRIVER as
+     * Build the URL a `webview` checkout (either `os`) hands to the DRIVER as
      * its redirect target — the package's own auto-registered
      * `{checkout.route}/callback/{driver}` route (see `routes/callback.php`),
      * NOT the customer's own `return_url` directly. The customer's real

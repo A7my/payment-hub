@@ -32,8 +32,10 @@ use Illuminate\Contracts\Auth\Authenticatable as AuthenticatableContract;
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Payable;
 use Mifatoyeh\LaravelPaymentFramework\Enums\Currency;
 use Mifatoyeh\LaravelPaymentFramework\ValueObjects\Money;
+use Mifatoyeh\LaravelPaymentFramework\Contracts\CapturesCheckoutContext;
 
-class User extends Authenticatable implements JWTSubject, Payable
+
+class User extends Authenticatable implements JWTSubject, Payable , CapturesCheckoutContext
 {
     use HasFactory, Notifiable, HasRoles, HasMedia;
 
@@ -131,7 +133,52 @@ class User extends Authenticatable implements JWTSubject, Payable
     public function authorizePayment(?AuthenticatableContract $payer): bool
     {
         // return true;
-        return $payer?->id === $this->id;
+        // return $payer?->id === $this->id;
+        return $payer !== null;
+    }
+
+   public function onPaymentCompleted(StatusResponse $status, CheckoutContext $context): void
+    {
+        if (! $status->isSuccessful() || $status->getStatus() !== PaymentStatus::Captured) return;
+
+        $transactionId = $status->getTransactionId()->toString();
+        if (Transaction::where('transaction_id', $transactionId)->exists()) return;
+
+        $payer = $context->payer();
+        if ($payer === null) return;
+
+        $duration     = $this->duration ?? 0;
+        $durationType = $this->duration_type ?? 'day';
+
+        $subscription = Subscription::create([
+            'user_id'                  => $payer->getAuthIdentifier(),
+            'package_id'               => $this->id,
+            'remaining_ad'             => $this->ad ?? 0,
+            'remaining_premium_ad'     => $this->premium_ad ?? 0,
+            'ad_duration'              => $duration,
+            'ad_duration_type'         => $durationType,
+            'premium_ad_duration'      => $this->premium_ad_duration ?? 0,
+            'premium_ad_duration_type' => $this->premium_ad_duration_type ?? 'day',
+            'start_date'               => now(),
+            'end_date'                 => now()->add($durationType, $duration),
+        ]);
+
+        Transaction::create([
+            'transaction_id'  => $transactionId,
+            'user_id'         => $payer->getAuthIdentifier(),
+            'package_id'      => $this->id,
+            'subscription_id' => $subscription->id,
+            'amount'          => $context->get('price', $this->price),
+            'payment_method'  => $context->driver,
+        ]);
+    }
+
+    public function captureCheckoutContext(): array
+    {
+        return [
+            'price'    => $this->price,
+            'payer' => auth()->user(),
+        ];
     }
 }
 ```
@@ -149,6 +196,7 @@ class User extends Authenticatable implements JWTSubject, Payable
     'route'      => env('PAYMENT_CHECKOUT_ROUTE', 'payment/checkout'), // you can change the route here.
     'middleware' => ['api', 'auth:api'],
 ],
+
 ```
 
 ### RUN THIS
@@ -156,10 +204,11 @@ class User extends Authenticatable implements JWTSubject, Payable
 http://127.0.0.1:8000/payment/checkout
 
 {
-"model_type": "user",
-"model_id": "2",
-"driver": "paymob",
-"driver_type": "webview",
-"return_url": "https://yourapp.com/payment/success",
-"cancel_url": "https://yourapp.com/payment/cancel"
+    "model_type": "package",
+    "model_id": "3",
+    "driver": "stripe",
+    "driver_type": "webview",
+    "return_url": "https://github.com/A7my/payment-hub",
+    "cancel_url": "https://www.google.com/",
+    "os" : "web"
 }

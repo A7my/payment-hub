@@ -245,18 +245,28 @@ final class CheckoutCallbackFlowTest extends TestCase
     {
         $order = $this->makeOrder();
 
-        // driver_type webview + os mobile: out of scope for the URL
-        // rewrite (see CheckoutService::checkout()'s own docblock) — the
-        // driver gets the return_url straight through, unaffected. The
-        // callback route is still hit directly here to exercise its own
-        // os-branching independent of how the redirect got triggered.
+        // driver_type webview + os mobile: ALSO routes through the
+        // package's own callback route now (not just os: web) — closing a
+        // real gap where a mobile webview checkout with no return_url would
+        // otherwise either fail outright (Stripe requires success_url
+        // unconditionally) or, if one WAS supplied, bypass verification
+        // entirely by redirecting straight to it.
         $this->actingAs(new CheckoutCallbackTestUser(1))->postJson('/payment/checkout', [
             'model_type'  => 'order',
             'model_id'    => (string) $order->id,
             'driver'      => 'fake_webview',
             'driver_type' => 'webview',
             'os'          => 'mobile',
+            // Deliberately no return_url — only required for webview+web.
         ])->assertStatus(200);
+
+        // Proves the fix: the DRIVER received the package's own callback
+        // URL, not a null/empty return_url.
+        $this->assertNotNull(FakeWebviewCallbackDriver::$lastRequest);
+        $this->assertStringStartsWith(
+            route('payment.checkout.callback', ['driver' => 'fake_webview']),
+            (string) FakeWebviewCallbackDriver::$lastRequest->returnUrl,
+        );
 
         $pending = CheckoutTransaction::query()->where('model_type', 'order')->where('model_id', (string) $order->id)->first();
         $this->assertSame('mobile', $pending->metadata['os']);

@@ -135,10 +135,13 @@ double-tapping "I've paid", a client retry after a dropped response) — it
 always re-verifies with the provider and re-applies the callback/event/
 persistence steps below; it does not error on a repeat call.
 
-## Webview + os: web — the auto-registered callback route
+## Webview mode — the auto-registered callback route
 
-For `driver_type: "webview"` + `os: "web"` specifically, you don't call
-`confirm()` at all — the package handles the whole round trip itself.
+For `driver_type: "webview"` — either `os` — you don't call `confirm()` at
+all — the package handles the whole round trip itself. `os` only decides
+the SHAPE of the result (a browser redirect for `web`, a plain JSON
+response for `mobile`); both go through the same callback route and the
+same verification.
 
 ```json
 POST /payment/checkout
@@ -153,8 +156,9 @@ POST /payment/checkout
 }
 ```
 
-`return_url` is **required** for this exact combination (`webview` + `web`)
-— every other combination still treats it as optional, same as before.
+`return_url` is **required** for `webview` + `web` specifically (there'd be
+nowhere to redirect the browser back to otherwise) — `webview` + `mobile`
+and both `sdk` combinations still treat it as optional.
 
 ### What actually happens
 
@@ -214,16 +218,24 @@ webhook as before.
 
 ### The mobile side of the same route
 
-If a `webview` checkout is ever confirmed via this route with `os: "mobile"`
-stored on it, the response is JSON instead of a redirect — the exact same
-shape `confirm()`'s response already has:
+`webview` + `os: "mobile"` is routed through this SAME callback route (no
+`return_url` needed — it's never used) — the response is JSON instead of a
+redirect, `confirm()`'s own shape plus a few extra fields a mobile client
+landing here from a webview redirect is more likely to need than a client
+calling `confirm()` itself (which already has these values from its own
+`checkout()` response):
 
 ```json
 {
   "status": "success",
   "payment_status": "captured",
   "transaction_id": "pi_3Nxxx...",
-  "message": "Payment succeeded."
+  "message": "Payment succeeded.",
+  "driver": "stripe",
+  "model_type": "order",
+  "model_id": "123",
+  "amount": 10000,
+  "currency": "USD"
 }
 ```
 
