@@ -66,7 +66,16 @@ final class WebhookController extends Controller
         // plain request data rather than a header. WebhookRequest itself
         // stays provider-agnostic either way — it just wraps whichever
         // value was found.
-        $sigHeader = $request->header('x-payment-signature', '');
+        // Provider signature headers (checked in order). Stripe reads
+        // stripe-signature inside its own verifier from $request->headers;
+        // here we only need a value for WebhookRequest::$signature —
+        // MyFatoorah uses MyFatoorah-Signature; Paymob uses a flat `hmac` param.
+        $sigHeader = (string) (
+            $request->header('myfatoorah-signature')
+            ?: $request->header('MyFatoorah-Signature')
+            ?: $request->header('x-payment-signature')
+            ?: ''
+        );
 
         if ($sigHeader === '') {
             $sigHeader = (string) $request->input('hmac', '');

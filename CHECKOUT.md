@@ -197,9 +197,9 @@ If nothing could be resolved at all (an unrecognised/unrelated request
 hitting the callback route), you get a JSON `404` instead of a redirect —
 there's no `return_url` to send the browser to in that case.
 
-### Why Stripe and Paymob both use the package callback for webview
+### Why Stripe, Paymob, and MyFatoorah use the package callback for webview
 
-For **`driver_type: webview`**, both Stripe and Paymob confirm via the
+For **`driver_type: webview`**, Stripe, Paymob, and MyFatoorah confirm via the
 package callback route (`payment/checkout/callback/{driver}`) after the
 customer finishes hosted checkout — then, for `os: "web"`, the package
 redirects the browser to your stored `return_url`.
@@ -217,11 +217,13 @@ redirects the browser to your stored `return_url`.
   Paymob appends `merchant_order_id`, `id`, `hmac`, etc. as query params —
   the same shape `resolveAndConfirm()` already understands.
 
-**Paymob webhooks are for `sdk` only.** A Transaction Processed Callback
-hitting `payment/webhook/paymob` will **not** confirm a pending `webview`
+**MyFatoorah** matches via `SendPayment` `CallBackUrl` (and `ErrorUrl`) set
+to the package callback; `CustomerReference` carries the merchant order id.
+
+**Paymob / MyFatoorah webhooks are for `sdk` only.** A provider notification
+hitting `payment/webhook/{driver}` will **not** confirm a pending `webview`
 row — confirmation stays on the callback route (Stripe-like). Sdk checkouts
-still auto-confirm via webhook; KSA Intention requests also receive
-`notification_url` pointing at that webhook route.
+still auto-confirm via webhook.
 
 Both routes ultimately funnel into the same
 `CheckoutService::resolveAndConfirm()` pipeline and the same HMAC /
@@ -262,14 +264,14 @@ that aren't 2-decimal (Japanese Yen has none, Kuwaiti Dinar has three).
 
 Calling `POST {route}/confirm` from your frontend is one way to trigger
 confirmation. Every driver that implements `supports('webhook') === true`
-(currently **Stripe and Paymob, both**) offers a second, fully automatic
+(currently **Stripe, Paymob, and MyFatoorah**) offers a second, fully automatic
 path: the provider's own server-to-server notification — sent directly to
 your app after a payment completes — is wired straight into the same
 confirmation logic via one shared route, `payment/webhook/{driver}`. **If
 you use this, you don't need a frontend confirm call, a custom route, or a
 return-URL landing page at all** — the package confirms the payment itself
 as soon as the provider tells it the outcome. This is also what makes
-`driver_type: "sdk"` mode's confirmation automatic for these two drivers —
+`driver_type: "sdk"` mode's confirmation automatic for these drivers —
 see [Background verification for sdk mode](#background-verification-for-sdk-mode)
 below.
 
@@ -414,6 +416,18 @@ request — so `source_data.pan` in Paymob's URL actually arrives as
 forms), but it's a sharp edge if you're ever comparing a raw Paymob URL
 against what `request()->all()` reports and wondering why they don't match.
 
+### MyFatoorah
+
+Same confirmation split as Paymob: **webview → package callback**, **sdk → package webhook**.
+
+1. Portal → Integration Settings → Webhook: enable **Webhook v2**, set URL to
+   `https://your-app.test/payment/webhook/myfatoorah`, put the secret in
+   `MYFATOORAH_WEBHOOK_SECRET`.
+2. Webview: `SendPayment` gets `CallBackUrl` = package callback
+   (`CustomerReference` = merchant order id). Sdk: `ExecutePayment` gets
+   `WebhookUrl` = package webhook route.
+3. Full API / signature details: [`MYFATOORAH.md`](MYFATOORAH.md).
+
 ## Background verification for sdk mode
 
 `driver_type: "sdk"` has no browser redirect at all — the client SDK
@@ -421,11 +435,11 @@ confirms the charge in place, so the package needs another way to learn the
 outcome. Which mechanism applies depends on `supports('webhook')` on the
 resolved driver:
 
-- **Driver supports webhooks** (Stripe and Paymob, both):
+- **Driver supports webhooks** (Stripe, Paymob, MyFatoorah):
   - **Stripe:** webhook resolves both `webview` and `sdk` (webview also has
     the callback route as the primary browser path).
-  - **Paymob:** webhook resolves **`sdk` only**; `webview` confirms via the
-    package callback route — see
+  - **Paymob / MyFatoorah:** webhook resolves **`sdk` only**; `webview`
+    confirms via the package callback route — see
     [Automatic confirmation via webhooks](#automatic-confirmation-via-webhooks-no-frontend-call-needed)
     above. Nothing else is dispatched for these drivers.
 - **Driver does NOT support webhooks**: `checkout()` dispatches a

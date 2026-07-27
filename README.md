@@ -2,7 +2,7 @@
 
 A provider-agnostic payment framework for Laravel 12+ / PHP 8.4+, built around
 the Strategy pattern: switch payment providers via config, not application
-code. Stripe and Paymob are built in today; PayPal and MyFatoorah are planned
+code. Stripe, Paymob, and MyFatoorah are built in today; PayPal is planned
 but **not yet implemented** — see [Status](#status) below.
 
 ## Install
@@ -433,8 +433,8 @@ provider:
 | ---------- | ---------------------------------------------- | ---------------- | ------------------------ | -------------- | ------------------ | ------------- | ---------------------- |
 | Stripe     | ✅                                               | ✅                | ✅                        | ✅              | ✅                  | ✅             | ✅                      |
 | Paymob     | ✅                                               | ✅                | ✅                        | 🚫              | ✅                  | ✅             | ⚠️                      |
+| MyFatoorah | ✅                                               | ✅                | 🚫                        | 🚫              | ✅                  | ✅             | ⚠️                      |
 | PayPal     | —                                                | —                 | —                         | —              | —                   | —             | planned, not started   |
-| MyFatoorah | —                                                | —                 | —                         | —              | —                   | —             | planned, not started   |
 
 ✅ implemented and tested · 🚧 not yet implemented (throws until it is) · 🚫 not supported by this provider (throws `UnsupportedOperationException`) · ⚠️ implemented, but unverified against a real provider signature — see [`CHECKOUT.md`](CHECKOUT.md#a-note-on-trust) before relying on it in production
 

@@ -366,8 +366,24 @@ final class CheckoutService
      */
     public function resolveAndConfirm(string $driver, array $rawPayload, string $source): ?CheckoutTransaction
     {
-        $merchantOrderId = (string) ($rawPayload['merchant_order_id'] ?? '');
-        $transactionId   = (string) ($rawPayload['transaction_reference'] ?? $rawPayload['session_id'] ?? $rawPayload['id'] ?? '');
+        // Stripe: merchant_order_id + session_id
+        // Paymob: merchant_order_id + id
+        // MyFatoorah: CustomerReference / ExternalIdentifier + InvoiceId / paymentId
+        $merchantOrderId = (string) (
+            $rawPayload['merchant_order_id']
+            ?? $rawPayload['CustomerReference']
+            ?? $rawPayload['customer_reference']
+            ?? ''
+        );
+        $transactionId = (string) (
+            $rawPayload['transaction_reference']
+            ?? $rawPayload['session_id']
+            ?? $rawPayload['paymentId']
+            ?? $rawPayload['PaymentId']
+            ?? $rawPayload['InvoiceId']
+            ?? $rawPayload['id']
+            ?? ''
+        );
 
         if ($merchantOrderId === '' || $transactionId === '') {
             return null;
@@ -413,15 +429,20 @@ final class CheckoutService
     /** @deprecated Thin wrapper — kept as the existing webhook listener's entry point. */
     public function confirmFromWebhook(string $driver, array $rawPayload): void
     {
-        // Paymob webview confirms via the package callback route only
-        // (Stripe-like UX). A Transaction Processed Callback may still fire
-        // for those payments — ignore it here so confirmation is owned by
+        // Paymob + MyFatoorah webview confirm via the package callback route
+        // only (Stripe-like UX). Provider server notifications may still fire
+        // for those payments — ignore them here so confirmation is owned by
         // CheckoutCallbackController. Sdk checkouts keep webhook as the
         // automatic path. Stripe is intentionally unchanged: its webview
         // still accepts webhook as a redundant backup.
-        $merchantOrderId = (string) ($rawPayload['merchant_order_id'] ?? '');
+        $merchantOrderId = (string) (
+            $rawPayload['merchant_order_id']
+            ?? $rawPayload['CustomerReference']
+            ?? $rawPayload['customer_reference']
+            ?? ''
+        );
 
-        if ($driver === 'paymob' && $merchantOrderId !== '') {
+        if (in_array($driver, ['paymob', 'myfatoorah'], true) && $merchantOrderId !== '') {
             $pending = CheckoutTransaction::query()
                 ->where('driver', $driver)
                 ->where('merchant_order_id', $merchantOrderId)

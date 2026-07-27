@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Mifatoyeh\LaravelPaymentFramework\Drivers\MyFatoorah\MyFatoorahDriver;
 use Mifatoyeh\LaravelPaymentFramework\Drivers\Paymob\PaymobDriver;
 use Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe\StripeDriver;
 
@@ -110,6 +111,31 @@ return [
 
             // HTTP request timeout in seconds.
             'timeout'        => (int) env('PAYMENT_TIMEOUT', 30),
+        ],
+
+        'myfatoorah' => [
+            // The built-in MyFatoorah driver implementation. Not configurable —
+            // driver classes are an internal detail of this package.
+            'class'              => MyFatoorahDriver::class,
+
+            // API token from the MyFatoorah portal (Integration Settings → API Key).
+            // Sent as Authorization: Bearer on every request.
+            'api_key'            => env('MYFATOORAH_API_KEY'),
+
+            // Webhook v2 secret (portal → Integration Settings → Webhook).
+            // Used to verify the MyFatoorah-Signature header.
+            'webhook_secret'     => env('MYFATOORAH_WEBHOOK_SECRET'),
+
+            // Default PaymentMethodId for ExecutePayment (sdk / charge / authorize).
+            // Demo Visa/Master is typically 2 — confirm via InitiatePayment for your account.
+            'payment_method_id'  => (int) env('MYFATOORAH_PAYMENT_METHOD_ID', 2),
+
+            // Optional explicit API host. When empty: sandbox → apitest.myfatoorah.com,
+            // live → api.myfatoorah.com (override for api-sa / api-eg / api-ae / …).
+            'base_url'           => env('MYFATOORAH_BASE_URL'),
+
+            'sandbox'            => env('PAYMENT_SANDBOX', true),
+            'timeout'            => (int) env('PAYMENT_TIMEOUT', 30),
         ],
 
     ],
