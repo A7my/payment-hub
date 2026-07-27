@@ -56,6 +56,29 @@ MYFATOORAH_PAYMENT_METHOD_ID=2
 
 Auth on every call: `Authorization: Bearer {api_key}`.
 
+### Troubleshooting HTTP 401
+
+MyFatoorah often returns **401 with an empty body** when the token is wrong
+for the host being called. Their own sample code treats that as “API key is
+not correct”.
+
+1. Confirm `.env` has a real token (not empty / not still a placeholder):
+   ```
+   MYFATOORAH_API_KEY=...long portal token...
+   ```
+2. Match **token environment** to **host**:
+   | Token from | Set |
+   |------------|-----|
+   | Test / demo portal (`demo.myfatoorah.com`) | `PAYMENT_SANDBOX=true` → `apitest.myfatoorah.com` |
+   | Live Kuwait/etc. | `PAYMENT_SANDBOX=false` |
+   | Live Saudi Arabia | `PAYMENT_SANDBOX=false` + `MYFATOORAH_BASE_URL=https://api-sa.myfatoorah.com` |
+   | Live Egypt | `PAYMENT_SANDBOX=false` + `MYFATOORAH_BASE_URL=https://api-eg.myfatoorah.com` |
+3. In the portal, open the API key and ensure it is **Active** and has
+   **Create Payments** (or Super Rules) permission.
+4. After changing `.env`: `php artisan config:clear` (and restart Octane/queue
+   workers if you use them).
+5. Do **not** put `Bearer ` in the env value — the driver adds it.
+
 ---
 
 ## Capability matrix

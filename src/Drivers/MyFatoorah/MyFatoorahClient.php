@@ -247,22 +247,50 @@ final class MyFatoorahClient
 
     private function request(): PendingRequest
     {
-        $token = (string) ($this->config['api_key'] ?? '');
-
         return $this->http
             ->baseUrl(rtrim($this->baseUrl(), '/'))
             ->timeout((int) ($this->config['timeout'] ?? 30))
             ->acceptJson()
-            ->withToken($token, 'Bearer');
+            ->withToken($this->apiToken(), 'Bearer');
+    }
+
+    /**
+     * Resolve and normalise the portal API token.
+     *
+     * Trims whitespace/newlines (common when pasting into `.env`) and strips
+     * an accidental leading `Bearer ` if the user copied the full header
+     * value into `MYFATOORAH_API_KEY`.
+     *
+     * @throws MyFatoorahApiException When the key is missing — fail before
+     *                                  any HTTP call so the message is clear.
+     */
+    private function apiToken(): string
+    {
+        $token = trim((string) ($this->config['api_key'] ?? ''));
+
+        if (str_starts_with(strtolower($token), 'bearer ')) {
+            $token = trim(substr($token, 7));
+        }
+
+        if ($token === '') {
+            throw new MyFatoorahApiException(
+                'MyFatoorah api_key is empty. Set MYFATOORAH_API_KEY in your .env to the ' .
+                'API token from the MyFatoorah portal (Integration Settings → API Key), ' .
+                'then run `php artisan config:clear`.',
+                401,
+            );
+        }
+
+        return $token;
     }
 
     private function baseUrl(): string
     {
         if (! empty($this->config['base_url'])) {
-            return (string) $this->config['base_url'];
+            return rtrim((string) $this->config['base_url'], '/');
         }
 
-        $sandbox = (bool) ($this->config['sandbox'] ?? true);
+        $sandbox = filter_var($this->config['sandbox'] ?? true, FILTER_VALIDATE_BOOLEAN);
 
         return $sandbox
             ? 'https://apitest.myfatoorah.com'
@@ -309,7 +337,7 @@ final class MyFatoorahClient
 
         if ($response->failed()) {
             throw new MyFatoorahApiException(
-                $this->extractErrorMessage($body, $operation),
+                $this->extractErrorMessage($body, $operation, $response->status()),
                 $response->status(),
                 $body,
             );
@@ -317,7 +345,7 @@ final class MyFatoorahClient
 
         if (array_key_exists('IsSuccess', $body) && $body['IsSuccess'] === false) {
             throw new MyFatoorahApiException(
-                $this->extractErrorMessage($body, $operation),
+                $this->extractErrorMessage($body, $operation, $response->status() ?: 422),
                 $response->status() ?: 422,
                 $body,
             );
@@ -331,7 +359,7 @@ final class MyFatoorahClient
     /**
      * @param array<string, mixed> $body
      */
-    private function extractErrorMessage(array $body, string $operation): string
+    private function extractErrorMessage(array $body, string $operation, int $httpStatus = 0): string
     {
         if (is_string($body['Message'] ?? null) && $body['Message'] !== '') {
             return $body['Message'];
@@ -345,6 +373,20 @@ final class MyFatoorahClient
 
         if ($body !== []) {
             return "MyFatoorah {$operation} request failed: " . json_encode($body, JSON_UNESCAPED_SLASHES);
+        }
+
+        // MyFatoorah's own sample clients treat an empty 401 body as "API key
+        // is not correct" — usually a missing/wrong token, or a live token
+        // hitting the sandbox host (or the reverse).
+        if ($httpStatus === 401) {
+            return sprintf(
+                'MyFatoorah rejected the API token (HTTP 401, empty body) against [%s]. ' .
+                'Check MYFATOORAH_API_KEY is set, active, and has "Create Payments" permission; ' .
+                'use a test token with PAYMENT_SANDBOX=true (apitest.myfatoorah.com) or a live ' .
+                'token with PAYMENT_SANDBOX=false (and MYFATOORAH_BASE_URL for regional hosts ' .
+                'like https://api-sa.myfatoorah.com). Then run `php artisan config:clear`.',
+                $this->baseUrl(),
+            );
         }
 
         return "MyFatoorah {$operation} request failed with an empty response body.";
