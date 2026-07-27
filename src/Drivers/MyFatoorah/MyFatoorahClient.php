@@ -19,14 +19,35 @@ use Mifatoyeh\LaravelPaymentFramework\ValueObjects\Money;
  * Thin HTTP transport for MyFatoorah's v2 REST API.
  *
  * Auth: `Authorization: Bearer {api_key}` on every request.
- * Base URL: sandbox → https://apitest.myfatoorah.com ; live → configurable
- * (default https://api.myfatoorah.com). Amounts are sent in **major** units
- * (decimal), converted from the framework's minor-unit {@see Money}.
+ * Base URL: resolved like the official MyFatoorah library from
+ * `sandbox` + `country_code` (SAU → api-sa, …), or an explicit `base_url`.
+ * Amounts are sent in **major** units (decimal), converted from the
+ * framework's minor-unit {@see Money}.
  *
  * @see https://docs.myfatoorah.com/docs/api-key
+ * @see https://portal.myfatoorah.com/Files/API/mf-config.json
  */
 final class MyFatoorahClient
 {
+    /**
+     * Live v2 hosts keyed by MyFatoorah vendor country code (vcCode).
+     * Sandbox always uses {@see self::SANDBOX_BASE_URL} for every country.
+     *
+     * @var array<string, string>
+     */
+    private const LIVE_BASE_URLS = [
+        'KWT' => 'https://api.myfatoorah.com',
+        'BHR' => 'https://api.myfatoorah.com',
+        'OMN' => 'https://api.myfatoorah.com',
+        'JOR' => 'https://api.myfatoorah.com',
+        'SAU' => 'https://api-sa.myfatoorah.com',
+        'ARE' => 'https://api-ae.myfatoorah.com',
+        'QAT' => 'https://api-qa.myfatoorah.com',
+        'EGY' => 'https://api-eg.myfatoorah.com',
+    ];
+
+    private const SANDBOX_BASE_URL = 'https://apitest.myfatoorah.com';
+
     private static ?HttpFactory $testHttpFactory = null;
 
     private readonly HttpFactory $http;
@@ -66,7 +87,8 @@ final class MyFatoorahClient
 
         $payload = array_filter(
             [
-                'NotificationOption' => 'LNK',
+                // Official samples / Laravel package use "Lnk" (not "LNK").
+                'NotificationOption' => 'Lnk',
                 'InvoiceValue'       => (float) $amount->toDecimalString(),
                 'DisplayCurrencyIso' => $request->currency->value,
                 'CustomerName'       => $request->customer?->name,
@@ -284,6 +306,13 @@ final class MyFatoorahClient
         return $token;
     }
 
+    /**
+     * Resolve the API host the same way as official `MyFatoorahPayment`:
+     * `isTest` / sandbox → apitest; live → country-specific v2 host.
+     *
+     * Config keys accepted for country (first non-empty wins):
+     * `country_code`, `country_iso`, `countryCode`, `vcCode`.
+     */
     private function baseUrl(): string
     {
         if (! empty($this->config['base_url'])) {
@@ -292,9 +321,33 @@ final class MyFatoorahClient
 
         $sandbox = filter_var($this->config['sandbox'] ?? true, FILTER_VALIDATE_BOOLEAN);
 
-        return $sandbox
-            ? 'https://apitest.myfatoorah.com'
-            : 'https://api.myfatoorah.com';
+        if ($sandbox) {
+            return self::SANDBOX_BASE_URL;
+        }
+
+        $code = $this->countryCode();
+
+        if ($code !== null && isset(self::LIVE_BASE_URLS[$code])) {
+            return self::LIVE_BASE_URLS[$code];
+        }
+
+        return self::LIVE_BASE_URLS['KWT'];
+    }
+
+    /**
+     * MyFatoorah vendor country code (e.g. SAU, KWT), or null if unset.
+     */
+    private function countryCode(): ?string
+    {
+        foreach (['country_code', 'country_iso', 'countryCode', 'vcCode'] as $key) {
+            $raw = $this->config[$key] ?? null;
+
+            if (is_string($raw) && trim($raw) !== '') {
+                return strtoupper(trim($raw));
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -381,10 +434,10 @@ final class MyFatoorahClient
         if ($httpStatus === 401) {
             return sprintf(
                 'MyFatoorah rejected the API token (HTTP 401, empty body) against [%s]. ' .
-                'Check MYFATOORAH_API_KEY is set, active, and has "Create Payments" permission; ' .
-                'use a test token with PAYMENT_SANDBOX=true (apitest.myfatoorah.com) or a live ' .
-                'token with PAYMENT_SANDBOX=false (and MYFATOORAH_BASE_URL for regional hosts ' .
-                'like https://api-sa.myfatoorah.com). Then run `php artisan config:clear`.',
+                'Match the token to the host: test token → PAYMENT_SANDBOX=true; live Saudi token → ' .
+                'PAYMENT_SANDBOX=false and MYFATOORAH_COUNTRY_CODE=SAU (→ api-sa.myfatoorah.com). ' .
+                'Reuse the same apiKey + isTest + countryCode values that work with the official ' .
+                'MyFatoorah Laravel package. Then run `php artisan config:clear`.',
                 $this->baseUrl(),
             );
         }

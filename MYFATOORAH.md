@@ -35,48 +35,53 @@ Implements: `PaymentDriverContract`, `SupportsSdkCheckout`, `SupportsCapabilitie
     'api_key'           => env('MYFATOORAH_API_KEY'),
     'webhook_secret'    => env('MYFATOORAH_WEBHOOK_SECRET'),
     'payment_method_id' => (int) env('MYFATOORAH_PAYMENT_METHOD_ID', 2),
-    'base_url'          => env('MYFATOORAH_BASE_URL'), // optional
-    'sandbox'           => env('PAYMENT_SANDBOX', true),
+    'country_code'      => env('MYFATOORAH_COUNTRY_CODE'), // SAU, KWT, … (official `countryCode`)
+    'base_url'          => env('MYFATOORAH_BASE_URL'), // optional override
+    'sandbox'           => env('PAYMENT_SANDBOX', true), // official `isTest`
     'timeout'           => (int) env('PAYMENT_TIMEOUT', 30),
 ],
 ```
 
+Map from the official MyFatoorah Laravel package:
+
+| Official config | This package |
+|-----------------|--------------|
+| `apiKey` / `myfatoorah.api_key` | `MYFATOORAH_API_KEY` |
+| `isTest` / `myfatoorah.test_mode` | `PAYMENT_SANDBOX` |
+| `countryCode` / `myfatoorah.country_iso` | `MYFATOORAH_COUNTRY_CODE` |
+
 ```env
 PAYMENT_DRIVER=myfatoorah
-MYFATOORAH_API_KEY=...
+MYFATOORAH_API_KEY=...          # same value as myfatoorah.api_key
+PAYMENT_SANDBOX=false           # same as myfatoorah.test_mode=false for live
+MYFATOORAH_COUNTRY_CODE=SAU     # same as myfatoorah.country_iso (Saudi → api-sa)
 MYFATOORAH_WEBHOOK_SECRET=...
 MYFATOORAH_PAYMENT_METHOD_ID=2
-# MYFATOORAH_BASE_URL=https://api-sa.myfatoorah.com   # optional regional live host
 ```
 
-| Environment | Default `base_url` |
-|-------------|--------------------|
-| Sandbox (`sandbox=true`) | `https://apitest.myfatoorah.com` |
-| Live | `https://api.myfatoorah.com` (override for `api-sa` / `api-eg` / `api-ae` / …) |
+| Environment | Resolved host |
+|-------------|----------------|
+| Sandbox (`PAYMENT_SANDBOX=true`) | `https://apitest.myfatoorah.com` |
+| Live + `SAU` | `https://api-sa.myfatoorah.com` |
+| Live + `ARE` / `QAT` / `EGY` | `api-ae` / `api-qa` / `api-eg` |
+| Live + `KWT` / `BHR` / `OMN` / `JOR` | `https://api.myfatoorah.com` |
+| Explicit `MYFATOORAH_BASE_URL` | that URL (wins over country) |
 
 Auth on every call: `Authorization: Bearer {api_key}`.
 
 ### Troubleshooting HTTP 401
 
 MyFatoorah often returns **401 with an empty body** when the token is wrong
-for the host being called. Their own sample code treats that as “API key is
-not correct”.
+for the host being called (their samples treat that as “API key is not correct”).
 
-1. Confirm `.env` has a real token (not empty / not still a placeholder):
-   ```
-   MYFATOORAH_API_KEY=...long portal token...
-   ```
-2. Match **token environment** to **host**:
-   | Token from | Set |
-   |------------|-----|
-   | Test / demo portal (`demo.myfatoorah.com`) | `PAYMENT_SANDBOX=true` → `apitest.myfatoorah.com` |
-   | Live Kuwait/etc. | `PAYMENT_SANDBOX=false` |
-   | Live Saudi Arabia | `PAYMENT_SANDBOX=false` + `MYFATOORAH_BASE_URL=https://api-sa.myfatoorah.com` |
-   | Live Egypt | `PAYMENT_SANDBOX=false` + `MYFATOORAH_BASE_URL=https://api-eg.myfatoorah.com` |
-3. In the portal, open the API key and ensure it is **Active** and has
-   **Create Payments** (or Super Rules) permission.
-4. After changing `.env`: `php artisan config:clear` (and restart Octane/queue
-   workers if you use them).
+Your working app calls `api-sa.myfatoorah.com` for Saudi live via `countryCode`.
+This package previously defaulted sandbox → `apitest`, which rejects a **live SAU**
+token with exactly that 401.
+
+1. Copy the **same three values** from the working app into `.env`.
+2. For Saudi live (SAR): `PAYMENT_SANDBOX=false` + `MYFATOORAH_COUNTRY_CODE=SAU`.
+3. Ensure the portal key is Active and has Create Payments permission.
+4. `php artisan config:clear` (restart Octane/queue workers if used).
 5. Do **not** put `Bearer ` in the env value — the driver adds it.
 
 ---

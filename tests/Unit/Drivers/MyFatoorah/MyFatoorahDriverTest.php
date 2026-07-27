@@ -113,7 +113,40 @@ final class MyFatoorahDriverTest extends TestCase
             return str_contains($request->url(), '/v2/SendPayment')
                 && ($body['CallBackUrl'] ?? null) === $callback
                 && ($body['CustomerReference'] ?? null) === 'idem-1'
+                && ($body['NotificationOption'] ?? null) === 'Lnk'
                 && ! array_key_exists('WebhookUrl', $body);
+        });
+    }
+
+    /** @test */
+    public function test_live_saudi_country_code_hits_api_sa_host(): void
+    {
+        $http = $this->fakeHttp([
+            'https://api-sa.myfatoorah.com/v2/SendPayment' => [[
+                'IsSuccess' => true,
+                'Data'      => [
+                    'InvoiceId'  => 300034,
+                    'InvoiceURL' => 'https://sa.myfatoorah.com/ie/x',
+                ],
+            ], 200],
+        ]);
+
+        $this->makeDriver([
+            'sandbox'      => false,
+            'country_code' => 'SAU',
+        ])->createPaymentLink(new PaymentLinkRequest(
+            amount: Money::ofMinor(1000, Currency::SAR),
+            currency: Currency::SAR,
+            description: 'Order',
+            customer: new CustomerData('Azmy', 'a@example.com'),
+            returnUrl: 'https://example.com/ok',
+            cancelUrl: null,
+            expiresAt: null,
+            idempotencyKey: 'idem-sa',
+        ));
+
+        $http->assertSent(function ($request): bool {
+            return $request->url() === 'https://api-sa.myfatoorah.com/v2/SendPayment';
         });
     }
 
