@@ -7,6 +7,7 @@ namespace Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe;
 use DateTimeImmutable;
 use Mifatoyeh\LaravelPaymentFramework\Enums\Currency;
 use Mifatoyeh\LaravelPaymentFramework\Enums\PaymentStatus;
+use Mifatoyeh\LaravelPaymentFramework\Enums\WebhookEventType;
 use Mifatoyeh\LaravelPaymentFramework\Responses\CaptureResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\PaymentLinkResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\PaymentResponse;
@@ -790,12 +791,119 @@ final class StripeMapper
     /**
      * Map a raw Stripe Event payload to a WebhookResponse.
      *
+     * Unlike every other method on this mapper, a Stripe Event is NESTED
+     * (`{type: 'checkout.session.completed', data: {object: {...}}}`), not a
+     * flat resource payload — `$object` (`data.object`, defaulting to `[]`
+     * when absent/malformed) is the Checkout Session, PaymentIntent, or
+     * Charge the event is about, depending on `type`.
+     *
+     * `successful` is unconditionally `true` for any RECOGNISED event type —
+     * same "successfully parsed" convention documented on
+     * {@see \Mifatoyeh\LaravelPaymentFramework\Drivers\Paymob\PaymobDriver::processWebhook()}
+     * (this says nothing about whether the underlying PAYMENT succeeded;
+     * that's `$eventType`/`isPaymentSuccess()`'s job) — `false` only for
+     * `WebhookEventType::Unknown`, so a caller inspecting `isSuccessful()`
+     * can distinguish "an event this driver understands" from "something it
+     * doesn't recognise," which `PaymobDriver::processWebhook()` cannot do
+     * (it hard-codes `true`) since Paymob's webhook has no `type` field to
+     * be unrecognised in the first place — Stripe's does.
+     *
+     * `merchant_order_id`/`session_id` are flattened onto the TOP LEVEL of
+     * the returned `rawPayload` (alongside the full original Event payload,
+     * kept for audit — see {@see WebhookResponse}'s own docblock) — this is
+     * the correlation key {@see \Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutService::resolveAndConfirm()}
+     * reads (`$rawPayload['merchant_order_id']` /
+     * `$rawPayload['transaction_reference'] ?? $rawPayload['session_id'] ?? $rawPayload['id']`
+     * — see that method's own docblock, "a third driver will need this list
+     * extended"), and a genuine server-to-server webhook has no callback URL
+     * to have embedded it in instead (unlike the redirect/callback path —
+     * see {@see \Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutService::buildCallbackUrl()}).
+     * `merchant_order_id` comes from `$object['metadata']['merchant_order_id']`
+     * — forwarded there by {@see \Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutService::checkout()}
+     * at creation time (see that method's own docblock) and echoed back
+     * unchanged by Stripe on every event for that object. `session_id` is
+     * deliberately named for the Checkout Session case even though the same
+     * key also carries a PaymentIntent id for `payment_intent.*` events —
+     * `resolveAndConfirm()` only cares that SOME transaction id ends up
+     * there before falling through to the generic `id` key, and
+     * {@see StripeClient::retrievePaymentIntent()} already branches on the
+     * `cs_`/`pi_` prefix itself, so a single shared key works for both
+     * without the caller needing to know which kind of id it received. Both
+     * keys are omitted (never set to an empty string) when absent, so they
+     * don't shadow a legitimately-named `session_id`/`merchant_order_id` key
+     * that might otherwise exist in `$raw` itself.
+     *
      * @param array<string, mixed> $raw The raw, decoded Stripe Event payload.
      */
     public function toWebhookResponse(array $raw): WebhookResponse
     {
-        // TODO: Map the Stripe Event `type` field to a WebhookEventType and
-        //       construct WebhookResponse, preserving the raw payload.
-        throw new \LogicException('StripeMapper::toWebhookResponse() not yet implemented.');
+        $type      = (string) ($raw['type'] ?? '');
+        $object    = $raw['data']['object'] ?? [];
+        $object    = is_array($object) ? $object : [];
+        $eventType = $this->mapWebhookEventType($type, $object);
+
+        $rawPayload = $raw;
+
+        $merchantOrderId = $object['metadata']['merchant_order_id'] ?? null;
+
+        if (is_string($merchantOrderId) && $merchantOrderId !== '') {
+            $rawPayload['merchant_order_id'] = $merchantOrderId;
+        }
+
+        $objectId = $object['id'] ?? null;
+
+        if (is_string($objectId) && $objectId !== '') {
+            $rawPayload['session_id'] = $objectId;
+        }
+
+        return new WebhookResponse(
+            successful: ! $eventType->isUnknown(),
+            eventType: $eventType,
+            message: $eventType->isUnknown()
+                ? "Unrecognised Stripe event type: '{$type}'."
+                : "Stripe event '{$type}' processed.",
+            rawPayload: $rawPayload,
+        );
+    }
+
+    /**
+     * Map a Stripe Event `type` string to the canonical WebhookEventType.
+     *
+     * Covers the events this driver's own operations can plausibly trigger
+     * (Checkout Session + PaymentIntent lifecycle, refunds, disputes) — NOT
+     * an exhaustive map of Stripe's entire event catalogue (subscriptions,
+     * payment methods, etc. are left `Unknown` until a caller needs them;
+     * see {@see WebhookEventType::Unknown}'s own docblock: "callers should
+     * log and skip Unknown events").
+     *
+     * `checkout.session.completed` alone is ambiguous for delayed/async
+     * payment methods (e.g. some bank debits) — Stripe's own guidance is to
+     * check `payment_status` on the Session object rather than assume
+     * `completed` always means funds have moved; `'paid'` maps to
+     * `PaymentSucceeded`, anything else (`'unpaid'`, `'no_payment_required'`)
+     * maps to `PaymentActionRequired` since the async outcome is still
+     * pending and arrives later via `checkout.session.async_payment_succeeded`/
+     * `async_payment_failed` — both mapped directly, no such ambiguity there.
+     *
+     * @param string               $type   The raw Stripe Event `type` value.
+     * @param array<string, mixed> $object The Event's `data.object` payload.
+     */
+    private function mapWebhookEventType(string $type, array $object): WebhookEventType
+    {
+        return match ($type) {
+            'checkout.session.completed' => (($object['payment_status'] ?? null) === 'paid')
+                ? WebhookEventType::PaymentSucceeded
+                : WebhookEventType::PaymentActionRequired,
+            'checkout.session.async_payment_succeeded' => WebhookEventType::PaymentSucceeded,
+            'checkout.session.async_payment_failed'    => WebhookEventType::PaymentFailed,
+            'payment_intent.succeeded'                 => WebhookEventType::PaymentSucceeded,
+            'payment_intent.payment_failed'            => WebhookEventType::PaymentFailed,
+            'payment_intent.canceled'                  => WebhookEventType::PaymentVoided,
+            'payment_intent.amount_capturable_updated' => WebhookEventType::PaymentAuthorized,
+            'charge.refunded'                           => WebhookEventType::RefundSucceeded,
+            'charge.dispute.created'                    => WebhookEventType::DisputeOpened,
+            'charge.dispute.closed'                     => WebhookEventType::DisputeResolved,
+            default                                      => WebhookEventType::Unknown,
+        };
     }
 }

@@ -137,6 +137,17 @@ class User extends Authenticatable implements JWTSubject, Payable , CapturesChec
         return $payer !== null;
     }
 
+    public function captureCheckoutContext(): array
+    {
+        // your logic and pass the values to the context 
+
+        return [
+            'price'    => $this->price,
+            'payer' => auth()->user(),
+        ];
+    }
+
+    
    public function onPaymentCompleted(StatusResponse $status, CheckoutContext $context): void
     {
         if (! $status->isSuccessful() || $status->getStatus() !== PaymentStatus::Captured) return;
@@ -147,6 +158,7 @@ class User extends Authenticatable implements JWTSubject, Payable , CapturesChec
         $payer = $context->payer();
         if ($payer === null) return;
 
+        // store your values here
         $duration     = $this->duration ?? 0;
         $durationType = $this->duration_type ?? 'day';
 
@@ -171,14 +183,6 @@ class User extends Authenticatable implements JWTSubject, Payable , CapturesChec
             'amount'          => $context->get('price', $this->price),
             'payment_method'  => $context->driver,
         ]);
-    }
-
-    public function captureCheckoutContext(): array
-    {
-        return [
-            'price'    => $this->price,
-            'payer' => auth()->user(),
-        ];
     }
 }
 ```

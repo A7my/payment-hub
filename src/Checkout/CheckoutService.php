@@ -18,6 +18,7 @@ use Mifatoyeh\LaravelPaymentFramework\Contracts\Drivers\SupportsTrustedWebhookSt
 use Mifatoyeh\LaravelPaymentFramework\Contracts\Payable;
 use Mifatoyeh\LaravelPaymentFramework\DTO\PaymentLinkRequest;
 use Mifatoyeh\LaravelPaymentFramework\DTO\TransactionLookupRequest;
+use Mifatoyeh\LaravelPaymentFramework\DTO\WebhookRequest;
 use Mifatoyeh\LaravelPaymentFramework\Drivers\PaymentDriverProxy;
 use Mifatoyeh\LaravelPaymentFramework\Enums\PaymentStatus;
 use Mifatoyeh\LaravelPaymentFramework\Events\CheckoutPaymentConfirmed;
@@ -27,6 +28,7 @@ use Mifatoyeh\LaravelPaymentFramework\Responses\PaymentLinkResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\SdkCheckoutResponse;
 use Mifatoyeh\LaravelPaymentFramework\Responses\StatusResponse;
 use Mifatoyeh\LaravelPaymentFramework\ValueObjects\TransactionId;
+use Mifatoyeh\LaravelPaymentFramework\ValueObjects\WebhookSignature;
 
 /**
  * Orchestrates the generic checkout flow for {@see CheckoutController}/
@@ -154,8 +156,19 @@ final class CheckoutService
             expiresAt: null,
             idempotencyKey: $idempotencyKey,
             metadata: [
-                'model_type' => $modelType,
-                'model_id'   => (string) $model->getKey(),
+                'model_type'        => $modelType,
+                'model_id'          => (string) $model->getKey(),
+                // Forwarded to the PROVIDER's own metadata (Stripe's
+                // Checkout Session/PaymentIntent metadata field — see
+                // StripeClient::createCheckoutSession()) so a genuine
+                // server-to-server webhook (no callback URL involved at
+                // all, unlike the redirect flow) can still echo this back —
+                // it's the only way {@see self::resolveAndConfirm()} can
+                // correlate a Stripe WEBHOOK event to a pending row; the
+                // callback route gets it from the URL instead (see
+                // buildCallbackUrl()), but a webhook has no URL to embed
+                // anything in.
+                'merchant_order_id' => $idempotencyKey,
             ],
         );
 
@@ -308,8 +321,23 @@ final class CheckoutService
      *      resolution and never influences it.
      *   3. Resolve the authoritative status: prefer
      *      {@see SupportsTrustedWebhookStatus::statusFromWebhookPayload()}
-     *      when the driver implements it and returns non-null, else a live
-     *      `lookup()` call.
+     *      when the driver implements it AND `verifyWebhookSignature()`
+     *      passes for this exact payload — checked HERE, not assumed from
+     *      `$source`. This is deliberate: `WebhookVerifier::verify()` only
+     *      runs for `$source === 'webhook'` traffic (see
+     *      {@see \Mifatoyeh\LaravelPaymentFramework\Webhooks\WebhookProcessor::process()});
+     *      `SupportsTrustedWebhookStatus` implementations are built on the
+     *      assumption that whoever calls them already verified the
+     *      signature (see that interface's own docblock — "already-HMAC-
+     *      verified webhook payload is the trust boundary"). Re-checking it
+     *      here closes what would otherwise be a real forgery hole for
+     *      `$source === 'callback'`: that route never went through
+     *      `WebhookVerifier` at all, so without this, anyone could hit the
+     *      callback URL with a fabricated `success=true` payload and no
+     *      valid signature, and a driver's trusted-status shortcut would
+     *      believe it. A failed/missing signature falls back to the live
+     *      `lookup()` below instead of trusting anything — never a hard
+     *      failure by itself.
      *   4. {@see self::confirmTransaction()} — persist, model callback, event.
      *
      * Deliberately silent (returns `null`, does not throw) when:
@@ -367,9 +395,11 @@ final class CheckoutService
             $wrapped->onCallbackReceived($rawPayload, $source);
         }
 
-        $status = $wrapped instanceof SupportsTrustedWebhookStatus
-            ? $wrapped->statusFromWebhookPayload($rawPayload)
-            : null;
+        $status = null;
+
+        if ($wrapped instanceof SupportsTrustedWebhookStatus && $this->signatureVerifies($driverInstance, $driver, $rawPayload)) {
+            $status = $wrapped->statusFromWebhookPayload($rawPayload);
+        }
 
         $status ??= $driverInstance->lookup(new TransactionLookupRequest(
             transactionId: TransactionId::fromString($transactionId),
@@ -383,6 +413,25 @@ final class CheckoutService
     /** @deprecated Thin wrapper — kept as the existing webhook listener's entry point. */
     public function confirmFromWebhook(string $driver, array $rawPayload): void
     {
+        // Paymob webview confirms via the package callback route only
+        // (Stripe-like UX). A Transaction Processed Callback may still fire
+        // for those payments — ignore it here so confirmation is owned by
+        // CheckoutCallbackController. Sdk checkouts keep webhook as the
+        // automatic path. Stripe is intentionally unchanged: its webview
+        // still accepts webhook as a redundant backup.
+        $merchantOrderId = (string) ($rawPayload['merchant_order_id'] ?? '');
+
+        if ($driver === 'paymob' && $merchantOrderId !== '') {
+            $pending = CheckoutTransaction::query()
+                ->where('driver', $driver)
+                ->where('merchant_order_id', $merchantOrderId)
+                ->first();
+
+            if ($pending !== null && $pending->driver_type === 'webview') {
+                return;
+            }
+        }
+
         $this->resolveAndConfirm($driver, $rawPayload, 'webhook');
     }
 
@@ -594,12 +643,11 @@ final class CheckoutService
      * for how Stripe's own `{CHECKOUT_SESSION_ID}` template substitution
      * supplies it on redirect instead.
      *
-     * UNUSED for Paymob in practice — confirmed (see
-     * {@see \Mifatoyeh\LaravelPaymentFramework\Drivers\Paymob\PaymobDriver}'s
-     * class docblock) that Paymob has no per-request redirect URL at all;
-     * this value is computed and passed through regardless (harmless — the
-     * Paymob client simply never reads `PaymentLinkRequest::$returnUrl`),
-     * so no driver-specific branching is needed here.
+     * UNUSED only when a driver ignores `PaymentLinkRequest::$returnUrl`
+     * entirely. Stripe always consumes it; Paymob KSA Intention API
+     * forwards it as `redirection_url`. Egypt Accept iframe still relies
+     * on the dashboard Transaction Response Callback pointing at this
+     * same route (Paymob appends the query fields itself).
      */
     private function buildCallbackUrl(string $driver, string $merchantOrderId): string
     {
@@ -625,6 +673,40 @@ final class CheckoutService
     private function driverSupportsWebhook(PaymentDriverContract $driver): bool
     {
         return $driver instanceof SupportsCapabilities && $driver->supports('webhook');
+    }
+
+    /**
+     * Verify a raw payload's signature via `PaymentDriverContract::verifyWebhookSignature()`
+     * — the SAME check {@see \Mifatoyeh\LaravelPaymentFramework\Services\WebhookVerifier::verify()}
+     * runs for the `/payment/webhook/{driver}` route, but invoked here
+     * directly so it applies uniformly regardless of which route delivered
+     * the payload. See {@see self::resolveAndConfirm()}'s own docblock for
+     * why this specific check exists.
+     *
+     * A minimal {@see WebhookRequest} is built from just the flat payload —
+     * every current `verifyWebhookSignature()` implementation
+     * ({@see \Mifatoyeh\LaravelPaymentFramework\Drivers\Paymob\PaymobDriver})
+     * only reads `$request->metadata['hmac']`, not headers/rawBody, so no
+     * more than that is available (or needed) here. Returns `false` on any
+     * exception rather than letting a driver's own error propagate — an
+     * unverifiable signature and a broken one are the same "don't trust
+     * this" outcome for this method's purposes.
+     */
+    private function signatureVerifies(PaymentDriverContract $driverInstance, string $driver, array $rawPayload): bool
+    {
+        $request = new WebhookRequest(
+            driver: $driver,
+            rawBody: '',
+            headers: [],
+            signature: WebhookSignature::fromString((string) ($rawPayload['hmac'] ?? '')),
+            metadata: $rawPayload,
+        );
+
+        try {
+            return $driverInstance->verifyWebhookSignature($request);
+        } catch (\Throwable) {
+            return false;
+        }
     }
 
     /**

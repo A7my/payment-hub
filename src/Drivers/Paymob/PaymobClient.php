@@ -154,20 +154,35 @@ final class PaymobClient
         string $currency,
         array $billingData,
         string $merchantOrderId,
+        ?string $redirectionUrl = null,
+        ?string $notificationUrl = null,
     ): array {
-        $response = $this->request(intentionApi: true)->post('/v1/intention/', [
-            'amount'           => $amountCents,
-            'currency'         => $currency,
-            'payment_methods'  => [(int) ($this->config['integration_id'] ?? 0)],
-            'items'            => [[
-                'name'        => 'Order ' . $merchantOrderId,
-                'amount'      => $amountCents,
-                'description' => 'Order ' . $merchantOrderId,
-                'quantity'    => 1,
-            ]],
-            'billing_data'     => $billingData,
-            'special_reference' => $merchantOrderId,
-        ]);
+        // redirection_url  — browser lands here after hosted checkout (webview
+        //                    callback, same role as Stripe's success_url).
+        // notification_url — server-to-server Transaction Processed Callback
+        //                    (sdk confirmation via the package webhook route).
+        // Both are Intention-API fields; omitted when null so Egypt legacy
+        // callers and tests that don't care about redirects stay unchanged.
+        $payload = array_filter(
+            [
+                'amount'            => $amountCents,
+                'currency'          => $currency,
+                'payment_methods'   => [(int) ($this->config['integration_id'] ?? 0)],
+                'items'             => [[
+                    'name'        => 'Order ' . $merchantOrderId,
+                    'amount'      => $amountCents,
+                    'description' => 'Order ' . $merchantOrderId,
+                    'quantity'    => 1,
+                ]],
+                'billing_data'      => $billingData,
+                'special_reference' => $merchantOrderId,
+                'redirection_url'   => $redirectionUrl,
+                'notification_url'  => $notificationUrl,
+            ],
+            static fn (mixed $value): bool => $value !== null && $value !== '',
+        );
+
+        $response = $this->request(intentionApi: true)->post('/v1/intention/', $payload);
 
         return $this->decode($response, 'createIntention');
     }

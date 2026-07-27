@@ -555,15 +555,22 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
     /**
      * {@inheritDoc}
      *
-     * Backed by Paymob's hosted iframe (order → payment key → iframe URL),
-     * the closest Paymob equivalent to Stripe's Checkout Session. Unlike
-     * Stripe's driver, `$request->returnUrl`/`$request->cancelUrl` are
-     * accepted by the DTO but NOT forwarded to Paymob — UNVERIFIED, but per
-     * general knowledge, Paymob's hosted iframe redirects to a URL
-     * configured per-integration in the Paymob dashboard, not supplied
-     * per-request the way Stripe's `success_url`/`cancel_url` are. No
-     * `returnUrl` guard is applied here for that reason (it would be
-     * enforcing a requirement Paymob doesn't actually have).
+     * Backed by Paymob's hosted checkout (Egypt iframe, or KSA unified
+     * checkout via the Intention API) — the closest Paymob equivalent to
+     * Stripe's Checkout Session.
+     *
+     * Webview confirmation matches Stripe: the package callback URL in
+     * `$request->returnUrl` (built by {@see \Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutService::buildCallbackUrl()})
+     * is forwarded as Intention `redirection_url` in KSA mode so the
+     * browser lands on `{checkout}/callback/paymob` after payment. Egypt
+     * Accept's classic iframe still uses the dashboard "Transaction
+     * Response Callback" — point that at the same package callback route
+     * (Paymob appends `merchant_order_id` / `id` / `hmac` as query params).
+     * No `returnUrl` guard here: Egypt does not require a per-request URL
+     * the way Stripe's Checkout Session requires `success_url`.
+     *
+     * Webhook confirmation is intentionally NOT used for webview — see
+     * {@see \Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutService::confirmFromWebhook()}.
      */
     public function createPaymentLink(PaymentLinkRequest $request): PaymentLinkResponse
     {
@@ -576,7 +583,14 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
         $step = 'init';
 
         try {
-            $ref = $this->createCheckoutReference($request, $step);
+            // Webview: browser callback only (redirection_url). No
+            // notification_url — sdk mode owns the webhook path.
+            $ref = $this->createCheckoutReference(
+                $request,
+                $step,
+                redirectionUrl: $request->returnUrl,
+                notificationUrl: null,
+            );
 
             $url = $this->client->isKsaMode()
                 ? $this->client->buildKsaCheckoutUrl($ref['secret'])
@@ -620,8 +634,12 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
      * No event is dispatched here — same reasoning as
      * {@see \Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe\StripeDriver::createSdkIntent()}:
      * creating an intent never itself charges anything; the actual outcome
-     * is confirmed later via `CheckoutService::confirm()`'s authoritative
-     * `lookup()` call.
+     * is confirmed later via the package webhook (preferred) or
+     * `CheckoutService::confirm()`'s authoritative `lookup()` call.
+     *
+     * Unlike webview, sdk mode forwards the package webhook URL as Intention
+     * `notification_url` (KSA) so Paymob's server-to-server callback is the
+     * automatic confirmation path — matching Stripe sdk + webhook behaviour.
      */
     public function createSdkIntent(PaymentLinkRequest $request): SdkCheckoutResponse
     {
@@ -634,7 +652,13 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
         $step = 'init';
 
         try {
-            $ref = $this->createCheckoutReference($request, $step);
+            // Sdk: webhook notification only. No browser redirection_url.
+            $ref = $this->createCheckoutReference(
+                $request,
+                $step,
+                redirectionUrl: null,
+                notificationUrl: $this->webhookNotificationUrl(),
+            );
 
             $response = new SdkCheckoutResponse(
                 successful: $ref['secret'] !== '',
@@ -669,12 +693,18 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
      * Paymob call failed, same as every other multi-call method in this
      * driver.
      *
-     * @param string $step Caller's step-tracking variable, updated in place.
+     * @param string      $step             Caller's step-tracking variable, updated in place.
+     * @param string|null $redirectionUrl   Intention `redirection_url` (webview callback).
+     * @param string|null $notificationUrl  Intention `notification_url` (sdk webhook).
      *
      * @return array{secret: string, reference: string, raw: array<string, mixed>}
      */
-    private function createCheckoutReference(PaymentLinkRequest $request, string &$step): array
-    {
+    private function createCheckoutReference(
+        PaymentLinkRequest $request,
+        string &$step,
+        ?string $redirectionUrl = null,
+        ?string $notificationUrl = null,
+    ): array {
         $name  = $request->customer?->name ?? 'NA Customer';
         $email = $request->customer?->email ?? 'guest@example.invalid';
         $phone = $request->customer?->phone;
@@ -689,6 +719,8 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
                 $request->currency->value,
                 $billingData,
                 $request->idempotencyKey,
+                $redirectionUrl,
+                $notificationUrl,
             ));
 
             return [
@@ -715,6 +747,27 @@ final class PaymobDriver extends AbstractDriver implements PaymentDriverContract
             'reference' => (string) $orderId,
             'raw'       => $order,
         ];
+    }
+
+    /**
+     * Absolute URL of the package webhook route used as Intention
+     * `notification_url` for sdk checkouts. Returns null when routes are
+     * unavailable (pure unit tests without a Laravel app) — Paymob then
+     * falls back to whatever Transaction Processed Callback is configured
+     * in the dashboard, which should still point at this same route in
+     * production.
+     */
+    private function webhookNotificationUrl(): ?string
+    {
+        if (! function_exists('route')) {
+            return null;
+        }
+
+        try {
+            return route('payment.webhook', ['driver' => 'paymob'], absolute: true);
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     /**

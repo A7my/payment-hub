@@ -6,6 +6,7 @@ namespace Mifatoyeh\LaravelPaymentFramework\Tests\Unit\Drivers\Stripe;
 
 use Mifatoyeh\LaravelPaymentFramework\Drivers\Stripe\StripeMapper;
 use Mifatoyeh\LaravelPaymentFramework\Enums\PaymentStatus;
+use Mifatoyeh\LaravelPaymentFramework\Enums\WebhookEventType;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -586,5 +587,145 @@ final class StripeMapperTest extends TestCase
         $response = $this->mapper->toPaymentLinkResponse(['id' => 'cs_test_004']);
 
         $this->assertSame('', $response->getPaymentUrl());
+    }
+
+    // =========================================================================
+    // toWebhookResponse() — event-type mapping and correlation-key flattening.
+    //
+    // Unlike every other mapper method, a Stripe Event is NESTED
+    // ({type, data: {object: {...}}}), not a flat resource payload — see
+    // toWebhookResponse()'s own docblock for why merchant_order_id/session_id
+    // are flattened onto the top level of the returned rawPayload rather than
+    // left nested: CheckoutService::resolveAndConfirm() reads them as flat
+    // keys, the same shape it already reads for Paymob's flat webhook payload.
+    // =========================================================================
+
+    /** @param array<string, mixed> $object */
+    private function stripeEvent(string $type, array $object): array
+    {
+        return ['id' => 'evt_test_001', 'object' => 'event', 'type' => $type, 'data' => ['object' => $object]];
+    }
+
+    /** @test */
+    public function test_checkout_session_completed_with_paid_status_maps_to_payment_succeeded(): void
+    {
+        $response = $this->mapper->toWebhookResponse($this->stripeEvent('checkout.session.completed', [
+            'id'             => 'cs_test_webhook_001',
+            'payment_status' => 'paid',
+            'metadata'       => ['merchant_order_id' => 'order-uuid-001'],
+        ]));
+
+        $this->assertTrue($response->isSuccessful());
+        $this->assertSame(WebhookEventType::PaymentSucceeded, $response->getEventType());
+        $this->assertTrue($response->isPaymentSuccess());
+        $this->assertSame('order-uuid-001', $response->getRawPayload()['merchant_order_id']);
+        $this->assertSame('cs_test_webhook_001', $response->getRawPayload()['session_id']);
+    }
+
+    /** @test */
+    public function test_checkout_session_completed_with_unpaid_status_maps_to_action_required(): void
+    {
+        // Async/delayed payment method — funds have not moved yet; the real
+        // outcome arrives later via checkout.session.async_payment_succeeded
+        // or async_payment_failed.
+        $response = $this->mapper->toWebhookResponse($this->stripeEvent('checkout.session.completed', [
+            'id'             => 'cs_test_webhook_002',
+            'payment_status' => 'unpaid',
+        ]));
+
+        $this->assertSame(WebhookEventType::PaymentActionRequired, $response->getEventType());
+        $this->assertFalse($response->isPaymentSuccess());
+    }
+
+    /** @test */
+    public function test_checkout_session_async_payment_succeeded_maps_to_payment_succeeded(): void
+    {
+        $response = $this->mapper->toWebhookResponse($this->stripeEvent('checkout.session.async_payment_succeeded', [
+            'id' => 'cs_test_webhook_003',
+        ]));
+
+        $this->assertSame(WebhookEventType::PaymentSucceeded, $response->getEventType());
+    }
+
+    /** @test */
+    public function test_checkout_session_async_payment_failed_maps_to_payment_failed(): void
+    {
+        $response = $this->mapper->toWebhookResponse($this->stripeEvent('checkout.session.async_payment_failed', [
+            'id' => 'cs_test_webhook_004',
+        ]));
+
+        $this->assertSame(WebhookEventType::PaymentFailed, $response->getEventType());
+    }
+
+    /** @test */
+    public function test_payment_intent_succeeded_maps_to_payment_succeeded_and_flattens_correlation_keys(): void
+    {
+        $response = $this->mapper->toWebhookResponse($this->stripeEvent('payment_intent.succeeded', [
+            'id'       => 'pi_test_webhook_001',
+            'metadata' => ['merchant_order_id' => 'order-uuid-002'],
+        ]));
+
+        $this->assertSame(WebhookEventType::PaymentSucceeded, $response->getEventType());
+        $this->assertSame('order-uuid-002', $response->getRawPayload()['merchant_order_id']);
+        $this->assertSame('pi_test_webhook_001', $response->getRawPayload()['session_id']);
+    }
+
+    /** @test */
+    public function test_payment_intent_payment_failed_maps_to_payment_failed(): void
+    {
+        $response = $this->mapper->toWebhookResponse($this->stripeEvent('payment_intent.payment_failed', [
+            'id' => 'pi_test_webhook_002',
+        ]));
+
+        $this->assertSame(WebhookEventType::PaymentFailed, $response->getEventType());
+    }
+
+    /** @test */
+    public function test_charge_refunded_maps_to_refund_succeeded(): void
+    {
+        $response = $this->mapper->toWebhookResponse($this->stripeEvent('charge.refunded', ['id' => 'ch_test_webhook_001']));
+
+        $this->assertSame(WebhookEventType::RefundSucceeded, $response->getEventType());
+        $this->assertTrue($response->getEventType()->isRefund());
+    }
+
+    /** @test */
+    public function test_charge_dispute_created_maps_to_dispute_opened(): void
+    {
+        $response = $this->mapper->toWebhookResponse($this->stripeEvent('charge.dispute.created', ['id' => 'dp_test_001']));
+
+        $this->assertSame(WebhookEventType::DisputeOpened, $response->getEventType());
+    }
+
+    /** @test */
+    public function test_an_unrecognised_event_type_maps_to_unknown_and_is_reported_unsuccessful(): void
+    {
+        $response = $this->mapper->toWebhookResponse($this->stripeEvent('customer.subscription.created', ['id' => 'sub_001']));
+
+        $this->assertSame(WebhookEventType::Unknown, $response->getEventType());
+        $this->assertFalse($response->isSuccessful());
+        $this->assertStringContainsString('customer.subscription.created', $response->getMessage());
+    }
+
+    /** @test */
+    public function test_an_event_with_no_metadata_omits_merchant_order_id_rather_than_a_blank_string(): void
+    {
+        $response = $this->mapper->toWebhookResponse($this->stripeEvent('payment_intent.succeeded', [
+            'id' => 'pi_test_webhook_003',
+        ]));
+
+        $this->assertArrayNotHasKey('merchant_order_id', $response->getRawPayload());
+        $this->assertSame('pi_test_webhook_003', $response->getRawPayload()['session_id']);
+    }
+
+    /** @test */
+    public function test_the_full_original_event_payload_is_preserved_in_raw_payload_for_audit(): void
+    {
+        $event = $this->stripeEvent('payment_intent.succeeded', ['id' => 'pi_test_webhook_004']);
+
+        $response = $this->mapper->toWebhookResponse($event);
+
+        $this->assertSame('evt_test_001', $response->getRawPayload()['id']);
+        $this->assertSame('payment_intent.succeeded', $response->getRawPayload()['type']);
     }
 }

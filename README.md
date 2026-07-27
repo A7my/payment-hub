@@ -431,14 +431,14 @@ provider:
 
 | Driver     | charge / authorize / void / capture / refund | verify / lookup | saveCard / chargeToken | subscriptions | createPaymentLink | sdk checkout | webhooks              |
 | ---------- | ---------------------------------------------- | ---------------- | ------------------------ | -------------- | ------------------ | ------------- | ---------------------- |
-| Stripe     | ✅                                               | ✅                | ✅                        | ✅              | ✅                  | ✅             | 🚧                      |
+| Stripe     | ✅                                               | ✅                | ✅                        | ✅              | ✅                  | ✅             | ✅                      |
 | Paymob     | ✅                                               | ✅                | ✅                        | 🚫              | ✅                  | ✅             | ⚠️                      |
 | PayPal     | —                                                | —                 | —                         | —              | —                   | —             | planned, not started   |
 | MyFatoorah | —                                                | —                 | —                         | —              | —                   | —             | planned, not started   |
 
 ✅ implemented and tested · 🚧 not yet implemented (throws until it is) · 🚫 not supported by this provider (throws `UnsupportedOperationException`) · ⚠️ implemented, but unverified against a real provider signature — see [`CHECKOUT.md`](CHECKOUT.md#a-note-on-trust) before relying on it in production
 
-Paymob's webhook doubles as the automatic checkout-confirmation trigger — see [`CHECKOUT.md`](CHECKOUT.md#automatic-confirmation-via-paymobs-webhook-no-frontend-call-needed).
+Stripe's and Paymob's webhooks both double as the automatic checkout-confirmation trigger — see [`CHECKOUT.md`](CHECKOUT.md#automatic-confirmation-via-webhooks-no-frontend-call-needed).
 
 Two things worth knowing about Paymob specifically before relying on it:
 - It has no official SDK, so its driver was built from general API knowledge

@@ -111,12 +111,13 @@ final class PaymobKsaWebhookTrustedStatusTest extends TestCase
             'model_type'  => 'order',
             'model_id'    => (string) $order->id,
             'driver'      => 'paymob',
-            'driver_type' => 'webview',
+            'driver_type' => 'sdk',
             'os'          => 'mobile',
         ])->assertStatus(200);
 
         $pending = CheckoutTransaction::query()->where('model_type', 'order')->where('model_id', (string) $order->id)->first();
         $this->assertNotNull($pending);
+        $this->assertSame('sdk', $pending->driver_type);
         $this->assertSame(PaymentStatus::Pending->value, $pending->status);
 
         $payload = [
@@ -160,6 +161,75 @@ final class PaymobKsaWebhookTrustedStatusTest extends TestCase
         $http->assertSentCount(1);
         $http->assertNotSent(fn ($request) => str_contains($request->url(), 'acceptance/transactions'));
         $http->assertNotSent(fn ($request) => str_contains($request->url(), 'auth/tokens'));
+    }
+
+    /**
+     * @test
+     *
+     * SECURITY REGRESSION: the trusted-payload shortcut above is only safe
+     * when the caller (WebhookVerifier, for the real /payment/webhook/paymob
+     * route) already verified the HMAC. This proves `resolveAndConfirm()`
+     * enforces that itself now, rather than assuming it — a forged payload
+     * with no valid signature, hit through EITHER route (here: the checkout
+     * callback route, which never goes through WebhookVerifier at all), must
+     * fall back to a real lookup() call and never be trusted directly.
+     */
+    public function test_forged_unsigned_payload_is_never_trusted_via_the_callback_route(): void
+    {
+        $http = new HttpFactory();
+        $http->fake([
+            '*/v1/intention/*'            => $http::response(['client_secret' => 'sau_csk_test_002', 'intention_order_id' => 6976638], 200),
+            // Matches real KSA behaviour established elsewhere in this
+            // package — the point isn't the exact status, it's that this
+            // gets hit AT ALL, proving the shortcut was not trusted blindly.
+            '*/acceptance/transactions/*' => $http::response(['detail' => 'Authentication credentials were not provided.'], 401),
+        ]);
+        PaymobClient::setTestHttpFactory($http);
+
+        $order = PaymobKsaWebhookTestOrder::create(['user_id' => 1, 'amount' => 4000, 'currency' => 'SAR']);
+
+        $this->actingAs(new PaymobKsaWebhookTestUser(1))->postJson('/payment/checkout', [
+            'model_type'  => 'order',
+            'model_id'    => (string) $order->id,
+            'driver'      => 'paymob',
+            'driver_type' => 'webview',
+            'os'          => 'mobile',
+        ])->assertStatus(200);
+
+        $pending = CheckoutTransaction::query()->where('model_type', 'order')->where('model_id', (string) $order->id)->first();
+
+        // Correct shape, claims success — but an attacker doesn't know the
+        // real HMAC secret, so this is exactly what a forgery looks like.
+        $forgedPayload = [
+            'amount_cents'      => '4000',
+            'currency'          => 'SAR',
+            'id'                => '9999999',
+            'success'           => 'true',
+            'pending'           => 'false',
+            'merchant_order_id' => $pending->merchant_order_id,
+        ];
+        $query = http_build_query([...$forgedPayload, 'hmac' => 'not-the-real-hmac']);
+
+        // Simulates what happens if Paymob's dashboard callback URL were
+        // ever pointed at the checkout callback route instead of (or as
+        // well as) the webhook route — the same resolveAndConfirm()
+        // pipeline is reached either way, so this must be safe regardless
+        // of which route delivers it.
+        $response = $this->get('/payment/checkout/callback/paymob?' . $query);
+
+        // lookup() was attempted and failed (matching real KSA behaviour) —
+        // NOT the trusted-payload shortcut, which would have reported success.
+        $response->assertStatus(502);
+
+        $pending->refresh();
+        $this->assertSame(
+            PaymentStatus::Pending->value,
+            $pending->status,
+            'A forged, unsigned payload must never flip a transaction to captured.',
+        );
+        $this->assertCount(0, PaymobKsaWebhookTestOrder::$callbackInvocations);
+
+        $http->assertSent(fn ($request) => str_contains($request->url(), 'acceptance/transactions'));
     }
 }
 

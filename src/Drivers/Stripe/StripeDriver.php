@@ -121,19 +121,24 @@ final class StripeDriver extends AbstractDriver implements PaymentDriverContract
     /**
      * {@inheritDoc}
      *
-     * Explicit about `'webhook'` specifically — {@see SupportsCapabilities}'s
-     * own docblock says a driver that doesn't implement this interface is
-     * ASSUMED to support everything, which would be actively wrong here:
-     * {@see self::processWebhook()}/{@see self::verifyWebhookSignature()}
-     * are still `// TODO` stubs. Rather than rely on that default (silently
-     * telling `CheckoutService`'s webhook-vs-job dispatch decision that
-     * Stripe webhooks work when they don't), Stripe now implements this
-     * interface explicitly, same as {@see \Mifatoyeh\LaravelPaymentFramework\Drivers\Paymob\PaymobDriver}
-     * already does — everything except `'webhook'` is supported.
+     * `'webhook'` is now genuinely supported — {@see self::processWebhook()}
+     * and {@see self::verifyWebhookSignature()} are fully implemented (real
+     * `Stripe-Signature` verification via {@see StripeWebhookVerifier}, real
+     * Event-payload translation via {@see StripeMapper::toWebhookResponse()}).
+     * Still declared explicitly (not left to {@see SupportsCapabilities}'s
+     * documented "assumed to support everything" default) so this stays a
+     * conscious statement of fact rather than an accident of omission —
+     * matches {@see \Mifatoyeh\LaravelPaymentFramework\Drivers\Paymob\PaymobDriver}'s
+     * own explicit `true` for the same capability. This flips
+     * `CheckoutService::driverSupportsWebhook()` to `true` for Stripe, which
+     * in turn means {@see CheckoutService::checkout()} stops dispatching
+     * {@see \Mifatoyeh\LaravelPaymentFramework\Checkout\Jobs\VerifyPaymentJob}
+     * for Stripe `sdk`-mode checkouts going forward — the webhook is now the
+     * active confirmation path for those instead of a polling job.
      */
     public function supports(string $capability): bool
     {
-        return $capability !== 'webhook';
+        return true;
     }
 
     /**
@@ -1015,26 +1020,66 @@ final class StripeDriver extends AbstractDriver implements PaymentDriverContract
         }
     }
 
-    /** {@inheritDoc} */
+    /**
+     * {@inheritDoc}
+     *
+     * Decodes `$request->rawBody` (the raw HTTP body {@see WebhookController}
+     * captured, BEFORE any framework JSON parsing — required for
+     * {@see self::verifyWebhookSignature()}'s HMAC to match) and delegates
+     * translation entirely to {@see StripeMapper::toWebhookResponse()},
+     * matching every other driver method's split (this class orchestrates,
+     * the mapper translates). A malformed/non-JSON body decodes to `[]` via
+     * `?? []` rather than throwing — the mapper's own `WebhookEventType::Unknown`
+     * fallback (empty `type` key) already reports that outcome accurately,
+     * consistent with {@see PaymobDriver::processWebhook()}'s "successful
+     * means successfully parsed" convention (see that method's docblock) —
+     * no {@see CardException} concept applies here, and every Throwable that
+     * escapes translation itself is still mapped via {@see StripeExceptionMapper}.
+     *
+     * WebhookReceived/WebhookProcessed are dispatched by
+     * {@see \Mifatoyeh\LaravelPaymentFramework\Webhooks\WebhookProcessor} at
+     * the orchestration layer, not here — same as every other driver.
+     */
     public function processWebhook(WebhookRequest $request): WebhookResponse
     {
-        // TODO: $this->logInfo('Processing webhook', $this->buildLogContext('processWebhook'));
-        // TODO: try {
-        //           $raw = /* json_decode($request->rawBody, true) */ [];
-        //           return $this->mapper->toWebhookResponse($raw);
-        //       } catch (\Throwable $e) {
-        //           $this->logError('Webhook processing failed', $this->buildLogContext('processWebhook'));
-        //           throw $this->exceptionMapper->map($e, ['operation' => 'processWebhook']);
-        //       }
-        // NOTE: WebhookReceived / WebhookProcessed are dispatched by
-        //       WebhookProcessor at the orchestration layer, not here.
-        throw new \LogicException('StripeDriver::processWebhook() not yet implemented.');
+        $this->logInfo('Processing webhook', $this->buildLogContext('processWebhook'));
+
+        try {
+            $raw = json_decode($request->rawBody, true) ?? [];
+            $raw = is_array($raw) ? $raw : [];
+
+            $response = $this->mapper->toWebhookResponse($raw);
+
+            $this->logInfo('Webhook processed', $this->buildLogContext('processWebhook', [
+                'event_type' => $response->getEventType()->value,
+            ]));
+
+            return $response;
+        } catch (Throwable $e) {
+            $this->logError('Webhook processing failed', $this->buildLogContext('processWebhook', [
+                'error' => $e->getMessage(),
+            ]));
+
+            throw $this->exceptionMapper->map($e, ['operation' => 'processWebhook']);
+        }
     }
 
-    /** {@inheritDoc} */
+    /**
+     * {@inheritDoc}
+     *
+     * Reads the `stripe-signature` header directly — NOT
+     * `$request->signature`/`WebhookController`'s generic
+     * `x-payment-signature`-then-`hmac` fallback (see that controller's own
+     * docblock), which was built around Paymob's flat-query-param shape and
+     * does not check Stripe's real header name. `WebhookRequest::header()`
+     * still resolves it correctly with no controller change needed: Symfony's
+     * `HeaderBag::all()` (what `WebhookController` passes as `$headers`)
+     * already captures every request header, lowercased, including
+     * `stripe-signature` — {@see self::$webhookVerifier} does the actual
+     * HMAC/timestamp verification.
+     */
     public function verifyWebhookSignature(WebhookRequest $request): bool
     {
-        // TODO: return $this->webhookVerifier->verify($request->rawBody, $request->signature->toString());
-        throw new \LogicException('StripeDriver::verifyWebhookSignature() not yet implemented.');
+        return $this->webhookVerifier->verify($request->rawBody, $request->header('stripe-signature'));
     }
 }

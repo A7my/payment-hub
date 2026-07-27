@@ -431,6 +431,73 @@ final class PaymobDriverTest extends TestCase
         $this->assertInstanceOf(PaymentLinkCreated::class, $this->events->dispatched[0]);
     }
 
+    /** @test */
+    public function test_create_payment_link_forwards_return_url_as_redirection_url_in_ksa_mode(): void
+    {
+        $http = new HttpFactory();
+        $http->fake([
+            '*/v1/intention/' => $http::response(
+                ['client_secret' => 'sau_csk_test_001', 'intention_order_id' => 777],
+                200,
+            ),
+        ]);
+        PaymobClient::setTestHttpFactory($http);
+
+        $callbackUrl = 'https://example.com/payment/checkout/callback/paymob?merchant_order_id=idem-paylink-ksa-001';
+
+        $response = $this->makeKsaDriver()->createPaymentLink(new PaymentLinkRequest(
+            amount: Money::ofMinor(10000, Currency::SAR),
+            currency: Currency::SAR,
+            description: 'Sandbox test payment',
+            customer: new CustomerData('Mohamed Azmy', 'azmy@example.com'),
+            returnUrl: $callbackUrl,
+            cancelUrl: null,
+            expiresAt: null,
+            idempotencyKey: 'idem-paylink-ksa-001',
+        ));
+
+        $this->assertTrue($response->isSuccessful());
+
+        $http->assertSent(function ($request) use ($callbackUrl): bool {
+            $body = $request->data();
+
+            return str_contains($request->url(), '/v1/intention/')
+                && ($body['redirection_url'] ?? null) === $callbackUrl
+                && ! array_key_exists('notification_url', $body);
+        });
+    }
+
+    /** @test */
+    public function test_create_sdk_intent_does_not_send_redirection_url_in_ksa_mode(): void
+    {
+        $http = new HttpFactory();
+        $http->fake([
+            '*/v1/intention/' => $http::response(
+                ['client_secret' => 'sau_csk_test_001', 'intention_order_id' => 777],
+                200,
+            ),
+        ]);
+        PaymobClient::setTestHttpFactory($http);
+
+        $this->makeKsaDriver()->createSdkIntent(new PaymentLinkRequest(
+            amount: Money::ofMinor(10000, Currency::SAR),
+            currency: Currency::SAR,
+            description: 'Sandbox test payment',
+            customer: new CustomerData('Mohamed Azmy', 'azmy@example.com'),
+            returnUrl: 'https://example.com/should-not-be-used',
+            cancelUrl: null,
+            expiresAt: null,
+            idempotencyKey: 'idem-sdk-ksa-redir-001',
+        ));
+
+        $http->assertSent(function ($request): bool {
+            $body = $request->data();
+
+            return str_contains($request->url(), '/v1/intention/')
+                && ! array_key_exists('redirection_url', $body);
+        });
+    }
+
     // =========================================================================
     // createSdkIntent()
     // =========================================================================

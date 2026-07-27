@@ -28,9 +28,27 @@ final class StripeWebhookVerifier
     /**
      * Verify a raw webhook payload against its Stripe-Signature header.
      *
-     * TODO: Use \Stripe\Webhook::constructEvent($payload, $signatureHeader, $this->webhookSecret())
-     *       (or a manual HMAC-SHA256 comparison) and return true/false based on
-     *       whether verification succeeds, instead of letting the SDK throw.
+     * Delegates to `\Stripe\WebhookSignature::verifyHeader()` (the same
+     * routine `\Stripe\Webhook::constructEvent()` uses internally — verified
+     * against the SDK, `vendor/stripe/stripe-php/lib/WebhookSignature.php`):
+     * extracts the `t=`/`v1=` pairs from the header, recomputes
+     * `hash_hmac('sha256', "{timestamp}.{payload}", $secret)`, and compares
+     * it against every `v1` signature present via a constant-time comparison
+     * — then checks the timestamp is within `Webhook::DEFAULT_TOLERANCE`
+     * (300 seconds) of now, to reject a replayed old payload. Both an
+     * invalid signature and a missing/unparsable header throw
+     * `Exception\SignatureVerificationException` (and a malformed header
+     * with no timestamp/signature pair also throws that same exception, not
+     * `UnexpectedValueException` — verified against the SDK, that latter
+     * exception is reserved for `constructEvent()`'s own JSON-decode step,
+     * which this method never reaches). Every Throwable here means "not
+     * valid" for this method's purposes, so it is caught broadly and turned
+     * into `false` rather than propagating — signature verification is a
+     * boolean gate, not a place that should ever surface an SDK exception to
+     * the caller.
+     *
+     * An empty configured secret always fails closed (never verified as
+     * valid) rather than skipping the check — see {@see self::webhookSecret()}.
      *
      * @param string $payload         The raw, unparsed webhook request body.
      * @param string $signatureHeader The value of the `Stripe-Signature` header.
@@ -39,18 +57,38 @@ final class StripeWebhookVerifier
      */
     public function verify(string $payload, string $signatureHeader): bool
     {
-        throw new \LogicException('StripeWebhookVerifier::verify() not yet implemented.');
+        $secret = $this->webhookSecret();
+
+        if ($secret === '' || $signatureHeader === '') {
+            return false;
+        }
+
+        try {
+            // $tolerance is NOT defaulted by WebhookSignature::verifyHeader()
+            // itself (its own default is `null`, which skips the timestamp
+            // check entirely — verified against the SDK) the way
+            // Webhook::constructEvent() defaults it for callers going
+            // through that higher-level method. Calling verifyHeader()
+            // directly, as this method does, must pass it explicitly or a
+            // replayed old payload would verify successfully forever.
+            return \Stripe\WebhookSignature::verifyHeader(
+                $payload,
+                $signatureHeader,
+                $secret,
+                \Stripe\Webhook::DEFAULT_TOLERANCE,
+            );
+        } catch (\Throwable) {
+            return false;
+        }
     }
 
     /**
      * Resolve the configured Stripe webhook signing secret.
      *
-     * TODO: return (string) ($this->config['webhook_secret'] ?? '');
-     *
      * @return string
      */
     private function webhookSecret(): string
     {
-        throw new \LogicException('StripeWebhookVerifier::webhookSecret() not yet implemented.');
+        return (string) ($this->config['webhook_secret'] ?? '');
     }
 }

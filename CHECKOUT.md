@@ -197,24 +197,35 @@ If nothing could be resolved at all (an unrecognised/unrelated request
 hitting the callback route), you get a JSON `404` instead of a redirect —
 there's no `return_url` to send the browser to in that case.
 
-### Why Stripe, and (currently) not Paymob
+### Why Stripe and Paymob both use the package callback for webview
 
-This only actually changes anything for **Stripe** — verified against the
-SDK, `success_url` genuinely accepts a fresh, dynamic value on every
-Checkout Session, so the package can point it at its own callback route
-per-request.
+For **`driver_type: webview`**, both Stripe and Paymob confirm via the
+package callback route (`payment/checkout/callback/{driver}`) after the
+customer finishes hosted checkout — then, for `os: "web"`, the package
+redirects the browser to your stored `return_url`.
 
-**Paymob cannot do this.** Its hosted checkout always redirects to whatever
-single URL is configured in the Paymob dashboard for that integration —
-there is no per-request override (see `PaymobDriver`'s own class docblock).
-In practice, that means Paymob's *existing* webhook route
-(`payment/webhook/paymob` — see the section above) already **is** its
-callback route; nothing changes for Paymob here, and you don't need to
-touch its dashboard setting again. `os`/`return_url` on a Paymob `webview`
-checkout are stored the same way, but nothing currently redirects the
-browser there automatically the way Stripe's does — Paymob customers still
-land whichever way your app already handles today, confirmed via the
-webhook as before.
+**Stripe** accepts a dynamic `success_url` on every Checkout Session, so
+`CheckoutService` rewrites it to the package callback URL per request
+(appending Stripe's `{CHECKOUT_SESSION_ID}` template on the way).
+
+**Paymob** matches that UX:
+
+- **KSA (Intention API):** the same package callback URL is sent as
+  Intention `redirection_url` on every webview checkout.
+- **Egypt (Accept iframe):** point the dashboard **Transaction Response
+  Callback** at `https://your-app.com/payment/checkout/callback/paymob`.
+  Paymob appends `merchant_order_id`, `id`, `hmac`, etc. as query params —
+  the same shape `resolveAndConfirm()` already understands.
+
+**Paymob webhooks are for `sdk` only.** A Transaction Processed Callback
+hitting `payment/webhook/paymob` will **not** confirm a pending `webview`
+row — confirmation stays on the callback route (Stripe-like). Sdk checkouts
+still auto-confirm via webhook; KSA Intention requests also receive
+`notification_url` pointing at that webhook route.
+
+Both routes ultimately funnel into the same
+`CheckoutService::resolveAndConfirm()` pipeline and the same HMAC /
+signature trust standard.
 
 ### The mobile side of the same route
 
@@ -247,21 +258,72 @@ Use `amount_formatted` if you just want something to display — it's
 currency-aware (`Currency::format()`), so it's correct even for currencies
 that aren't 2-decimal (Japanese Yen has none, Kuwaiti Dinar has three).
 
-## Automatic confirmation via Paymob's webhook (no frontend call needed)
+## Automatic confirmation via webhooks (no frontend call needed)
 
 Calling `POST {route}/confirm` from your frontend is one way to trigger
-confirmation. For Paymob specifically, there's a second, fully automatic
-path: Paymob's own "Transaction Processed Callback" — a request Paymob's
-servers send directly to yours after a payment completes — is now wired
-straight into the same confirmation logic. **If you use this, you don't
-need a frontend confirm call, a custom route, or a return-URL landing page
-at all** — the package confirms the payment itself as soon as Paymob tells
-it the outcome.
+confirmation. Every driver that implements `supports('webhook') === true`
+(currently **Stripe and Paymob, both**) offers a second, fully automatic
+path: the provider's own server-to-server notification — sent directly to
+your app after a payment completes — is wired straight into the same
+confirmation logic via one shared route, `payment/webhook/{driver}`. **If
+you use this, you don't need a frontend confirm call, a custom route, or a
+return-URL landing page at all** — the package confirms the payment itself
+as soon as the provider tells it the outcome. This is also what makes
+`driver_type: "sdk"` mode's confirmation automatic for these two drivers —
+see [Background verification for sdk mode](#background-verification-for-sdk-mode)
+below.
 
-### Setup
+### Stripe
+
+1. In the [Stripe Dashboard](https://dashboard.stripe.com/webhooks) (or the
+   CLI: `stripe listen --forward-to https://your-app.test/payment/webhook/stripe`
+   for local development), add an endpoint pointed at:
+   ```
+   https://your-app.test/payment/webhook/stripe
+   ```
+   (or wherever `payment.webhook.prefix` resolves to — default
+   `payment/webhook`). Subscribe it to at least `checkout.session.completed`
+   (`webview` mode) and `payment_intent.succeeded`/`payment_intent.payment_failed`
+   (`sdk` mode) — see `StripeMapper::toWebhookResponse()`'s own docblock for
+   the full list of event types this driver currently maps.
+2. Copy the endpoint's **Signing secret** (`whsec_...`) into
+   `STRIPE_WEBHOOK_SECRET` (`payment.drivers.stripe.webhook_secret` in
+   config). Without it, every webhook is rejected — signature verification
+   fails closed on a missing/empty secret, never skipped.
+3. That's it. No route, no controller, no frontend code to write —
+   `checkout()` already forwards its own correlation key
+   (`merchant_order_id`) into Stripe's own `metadata` field on every
+   Checkout Session/PaymentIntent it creates, specifically so a genuine
+   webhook event (which has no callback URL to have carried that key in
+   instead) can still be matched back to the right pending row.
+
+Stripe does **not** implement `SupportsTrustedWebhookStatus` (unlike
+Paymob's KSA mode below) — every Stripe webhook still triggers a live
+`lookup()` call back to Stripe to authoritatively re-confirm the outcome,
+never trusting the event payload's own fields directly. The signature check
+still runs first regardless — via the Stripe SDK's own official
+`Stripe-Signature` verification routine, not a custom-built HMAC
+calculation — it just isn't, on its own, the final word for Stripe the way
+a verified payload can be for Paymob KSA below.
+
+### Paymob
+
+Paymob confirmation is **mode-split** (unlike Stripe, which accepts webhook
+as a backup for webview too):
+
+| Mode | Confirms via | Configure in Paymob |
+|------|--------------|---------------------|
+| `webview` | Package callback route | **Transaction Response Callback** → `/payment/checkout/callback/paymob` (Egypt dashboard). KSA Intention gets `redirection_url` per request automatically. |
+| `sdk` | Package webhook route | **Transaction Processed Callback** → `/payment/webhook/paymob`. KSA Intention also gets `notification_url` per request. |
+
+A webhook for a pending **webview** row is accepted (HTTP 200) but does
+**not** confirm — use the callback route for that.
+
+#### Setup (sdk / Transaction Processed Callback)
 
 1. In the Paymob dashboard (Developers → Payment Integrations → your
-   integration → HMAC / webhook settings), set the callback URL to:
+   integration → HMAC / webhook settings), set the **Transaction Processed
+   Callback** URL to:
    ```
    https://your-app.test/payment/webhook/paymob
    ```
@@ -269,13 +331,23 @@ it the outcome.
    `payment/webhook`). Do **not** point it at a route in your own app —
    this package owns and registers that route itself, the same way it owns
    `payment/checkout` (see the README's checkout section).
-2. Set `PAYMOB_HMAC_SECRET` in your `.env` to the HMAC secret shown on that
+2. For **webview** (Egypt Accept iframe), separately set **Transaction
+   Response Callback** to:
+   ```
+   https://your-app.test/payment/checkout/callback/paymob
+   ```
+   Paymob appends `merchant_order_id`, `id`, `hmac`, etc. KSA webview does
+   not need this dashboard entry — Intention `redirection_url` is set per
+   checkout.
+3. Set `PAYMOB_HMAC_SECRET` in your `.env` to the HMAC secret shown on that
    same dashboard page (`payment.drivers.paymob.hmac_secret` in config).
-   Without it, every webhook is rejected with HTTP 400 — this package never
-   accepts an unsigned/unverifiable webhook as authentic.
-3. That's it. No route, no controller, no frontend code to write.
+   Without it, every webhook/callback signature check is rejected with
+   HTTP 400 — this package never accepts an unsigned/unverifiable payload
+   as authentic.
+4. That's it. No route, no controller, no frontend confirm call required
+   for either mode.
 
-### How it works
+#### How it works
 
 Paymob's classic callback is a **GET** request with every field — including
 the HMAC signature — flattened into the query string (not a JSON POST body
@@ -301,7 +373,7 @@ A webhook that doesn't match any pending checkout row (unrelated Paymob
 traffic, or a transaction that didn't originate from this endpoint) is
 accepted (HTTP 200) but does nothing — this is normal, not an error.
 
-### Where the status comes from: Egypt vs. KSA
+#### Where the status comes from: Egypt vs. KSA
 
 - **Egypt/Accept mode** (`api_key` configured): the package calls the
   driver's `lookup()` again to re-confirm the outcome directly with Paymob
@@ -321,7 +393,7 @@ accepted (HTTP 200) but does nothing — this is normal, not an error.
   this should be revisited — a live re-check is strictly stronger than
   trusting a single webhook delivery.
 
-### A note on trust
+#### A note on trust
 
 > **UNVERIFIED AGAINST A LIVE SIGNED PAYLOAD.** The HMAC field list and
 > order this package uses come from Paymob's publicly documented
@@ -349,11 +421,13 @@ confirms the charge in place, so the package needs another way to learn the
 outcome. Which mechanism applies depends on `supports('webhook')` on the
 resolved driver:
 
-- **Driver supports webhooks** (Paymob today; Stripe once its webhook
-  implementation lands): its existing webhook route resolves `sdk`-mode
-  checkouts exactly the same way it already resolves `webview` ones — see
-  [Automatic confirmation via Paymob's webhook](#automatic-confirmation-via-paymobs-webhook-no-frontend-call-needed)
-  above. Nothing else is dispatched.
+- **Driver supports webhooks** (Stripe and Paymob, both):
+  - **Stripe:** webhook resolves both `webview` and `sdk` (webview also has
+    the callback route as the primary browser path).
+  - **Paymob:** webhook resolves **`sdk` only**; `webview` confirms via the
+    package callback route — see
+    [Automatic confirmation via webhooks](#automatic-confirmation-via-webhooks-no-frontend-call-needed)
+    above. Nothing else is dispatched for these drivers.
 - **Driver does NOT support webhooks**: `checkout()` dispatches a
   self-rescheduling `VerifyPaymentJob` — it calls `lookup()`, and if the
   result isn't conclusive yet (still `pending`/`requires_action`), reschedules
