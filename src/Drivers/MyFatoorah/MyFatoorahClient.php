@@ -442,6 +442,19 @@ final class MyFatoorahClient
             );
         }
 
+        // Empty 403 is usually Azure Application Gateway / WAF in front of
+        // MyFatoorah (blocked IP, or request blocked before the API runs).
+        if ($httpStatus === 403) {
+            return sprintf(
+                'MyFatoorah blocked the request (HTTP 403, empty body) against [%s]. ' .
+                'This is usually IP / WAF blocking on the live host — not a bad payload. ' .
+                'Whitelist your server public IP in the MyFatoorah portal (SAU), or test from ' .
+                'the same network/server where the official package already works. ' .
+                'Do not use localhost as CallBackUrl for live; use a public HTTPS URL.',
+                $this->baseUrl(),
+            );
+        }
+
         return "MyFatoorah {$operation} request failed with an empty response body.";
     }
 }
