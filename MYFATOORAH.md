@@ -52,22 +52,30 @@ Map from the official MyFatoorah Laravel package:
 
 ```env
 PAYMENT_DRIVER=myfatoorah
-MYFATOORAH_API_KEY=...          # same value as myfatoorah.api_key
-PAYMENT_SANDBOX=false           # same as myfatoorah.test_mode=false for live
-MYFATOORAH_COUNTRY_CODE=SAU     # same as myfatoorah.country_iso (Saudi → api-sa)
+MYFATOORAH_API_KEY=...
+PAYMENT_SANDBOX=false
+MYFATOORAH_COUNTRY_CODE=SAU     # required for live — selects host from the map below
 MYFATOORAH_WEBHOOK_SECRET=...
 MYFATOORAH_PAYMENT_METHOD_ID=2
+# MYFATOORAH_BASE_URL=          # optional override; leave empty to use country_code
 ```
 
-| Environment | Resolved host |
-|-------------|----------------|
-| Sandbox (`PAYMENT_SANDBOX=true`) | `https://apitest.myfatoorah.com` |
-| Live + `SAU` | `https://api-sa.myfatoorah.com` |
-| Live + `ARE` / `QAT` / `EGY` | `api-ae` / `api-qa` / `api-eg` |
-| Live + `KWT` / `BHR` / `OMN` / `JOR` | `https://api.myfatoorah.com` |
-| Explicit `MYFATOORAH_BASE_URL` | that URL (wins over country) |
+| `MYFATOORAH_COUNTRY_CODE` | Live host |
+|---------------------------|-----------|
+| `SAU` | `https://api-sa.myfatoorah.com` |
+| `ARE` | `https://api-ae.myfatoorah.com` |
+| `QAT` | `https://api-qa.myfatoorah.com` |
+| `EGY` | `https://api-eg.myfatoorah.com` |
+| `KWT` / `BHR` / `OMN` / `JOR` | `https://api.myfatoorah.com` |
+| *(any, when `PAYMENT_SANDBOX=true`)* | `https://apitest.myfatoorah.com` |
 
 Auth on every call: `Authorization: Bearer {api_key}`.
+
+> **Published config:** if you already ran `php artisan vendor:publish` for
+> `payment.php`, add `country_code` under `drivers.myfatoorah` yourself (or set
+> `MYFATOORAH_BASE_URL`). A stale published file **replaces** the whole
+> `drivers` block, so `.env` alone may not apply until that key exists in
+> `config/payment.php`. Then `php artisan config:clear`.
 
 ### Troubleshooting HTTP 401
 

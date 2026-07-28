@@ -151,6 +151,58 @@ final class MyFatoorahDriverTest extends TestCase
     }
 
     /** @test */
+    public function test_live_without_country_code_throws(): void
+    {
+        $this->expectException(\Mifatoyeh\LaravelPaymentFramework\Exceptions\InvalidConfigurationException::class);
+        $this->expectExceptionMessage('MYFATOORAH_COUNTRY_CODE');
+
+        $this->makeDriver([
+            'sandbox' => false,
+        ])->createPaymentLink(new PaymentLinkRequest(
+            amount: Money::ofMinor(1000, Currency::KWD),
+            currency: Currency::KWD,
+            description: 'Order',
+            customer: new CustomerData('Azmy', 'a@example.com'),
+            returnUrl: 'https://example.com/ok',
+            cancelUrl: null,
+            expiresAt: null,
+            idempotencyKey: 'idem-kw',
+        ));
+    }
+
+    /** @test */
+    public function test_live_kuwait_country_code_hits_api_host(): void
+    {
+        $http = $this->fakeHttp([
+            'https://api.myfatoorah.com/v2/SendPayment' => [[
+                'IsSuccess' => true,
+                'Data'      => [
+                    'InvoiceId'  => 1,
+                    'InvoiceURL' => 'https://portal.myfatoorah.com/ie/x',
+                ],
+            ], 200],
+        ]);
+
+        $this->makeDriver([
+            'sandbox'      => false,
+            'country_code' => 'KWT',
+        ])->createPaymentLink(new PaymentLinkRequest(
+            amount: Money::ofMinor(1000, Currency::KWD),
+            currency: Currency::KWD,
+            description: 'Order',
+            customer: new CustomerData('Azmy', 'a@example.com'),
+            returnUrl: 'https://example.com/ok',
+            cancelUrl: null,
+            expiresAt: null,
+            idempotencyKey: 'idem-kw',
+        ));
+
+        $http->assertSent(function ($request): bool {
+            return $request->url() === 'https://api.myfatoorah.com/v2/SendPayment';
+        });
+    }
+
+    /** @test */
     public function test_create_sdk_intent_uses_execute_payment(): void
     {
         $this->fakeHttp([

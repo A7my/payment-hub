@@ -308,15 +308,21 @@ final class MyFatoorahClient
 
     /**
      * Resolve the API host the same way as official `MyFatoorahPayment`:
-     * `isTest` / sandbox → apitest; live → country-specific v2 host.
+     * `isTest` / sandbox → apitest; live → host from {@see self::LIVE_BASE_URLS}
+     * keyed by `MYFATOORAH_COUNTRY_CODE` (SAU, KWT, …).
+     *
+     * `MYFATOORAH_BASE_URL` still wins when set (escape hatch).
      *
      * Config keys accepted for country (first non-empty wins):
      * `country_code`, `country_iso`, `countryCode`, `vcCode`.
      */
     private function baseUrl(): string
     {
-        if (! empty($this->config['base_url'])) {
-            return rtrim((string) $this->config['base_url'], '/');
+        $explicit = $this->configString('base_url')
+            ?? $this->envString('MYFATOORAH_BASE_URL');
+
+        if ($explicit !== null) {
+            return rtrim($explicit, '/');
         }
 
         $sandbox = filter_var($this->config['sandbox'] ?? true, FILTER_VALIDATE_BOOLEAN);
@@ -325,29 +331,85 @@ final class MyFatoorahClient
             return self::SANDBOX_BASE_URL;
         }
 
-        $code = $this->countryCode();
+        return $this->liveBaseUrlForCountry($this->countryCode());
+    }
 
-        if ($code !== null && isset(self::LIVE_BASE_URLS[$code])) {
-            return self::LIVE_BASE_URLS[$code];
+    /**
+     * @throws MyFatoorahApiException When country code is missing or unknown.
+     */
+    private function liveBaseUrlForCountry(?string $code): string
+    {
+        $allowed = implode(', ', array_keys(self::LIVE_BASE_URLS));
+
+        if ($code === null) {
+            throw new MyFatoorahApiException(
+                'MyFatoorah live mode requires MYFATOORAH_COUNTRY_CODE in .env ' .
+                "(one of: {$allowed}). Example for Saudi Arabia: MYFATOORAH_COUNTRY_CODE=SAU",
+                400,
+            );
         }
 
-        return self::LIVE_BASE_URLS['KWT'];
+        if (! isset(self::LIVE_BASE_URLS[$code])) {
+            throw new MyFatoorahApiException(
+                "Unknown MyFatoorah country code [{$code}]. Supported: {$allowed}.",
+                400,
+            );
+        }
+
+        return self::LIVE_BASE_URLS[$code];
     }
 
     /**
      * MyFatoorah vendor country code (e.g. SAU, KWT), or null if unset.
+     *
+     * Also reads .env directly when a published `config/payment.php` is missing
+     * the newer `country_code` key (Laravel shallow-merges the whole `drivers` block).
      */
     private function countryCode(): ?string
     {
         foreach (['country_code', 'country_iso', 'countryCode', 'vcCode'] as $key) {
-            $raw = $this->config[$key] ?? null;
+            $raw = $this->configString($key);
 
-            if (is_string($raw) && trim($raw) !== '') {
-                return strtoupper(trim($raw));
+            if ($raw !== null) {
+                return strtoupper($raw);
+            }
+        }
+
+        foreach (['MYFATOORAH_COUNTRY_CODE', 'MYFATOORAH_COUNTRY_ISO'] as $envKey) {
+            $raw = $this->envString($envKey);
+
+            if ($raw !== null) {
+                return strtoupper($raw);
             }
         }
 
         return null;
+    }
+
+    private function configString(string $key): ?string
+    {
+        $raw = $this->config[$key] ?? null;
+
+        if (! is_string($raw)) {
+            return null;
+        }
+
+        $raw = trim($raw);
+
+        return $raw !== '' ? $raw : null;
+    }
+
+    private function envString(string $key): ?string
+    {
+        $raw = $_ENV[$key] ?? $_SERVER[$key] ?? getenv($key);
+
+        if (! is_string($raw)) {
+            return null;
+        }
+
+        $raw = trim($raw);
+
+        return $raw !== '' ? $raw : null;
     }
 
     /**
@@ -448,9 +510,8 @@ final class MyFatoorahClient
             return sprintf(
                 'MyFatoorah blocked the request (HTTP 403, empty body) against [%s]. ' .
                 'This is usually IP / WAF blocking on the live host — not a bad payload. ' .
-                'Whitelist your server public IP in the MyFatoorah portal (SAU), or test from ' .
-                'the same network/server where the official package already works. ' .
-                'Do not use localhost as CallBackUrl for live; use a public HTTPS URL.',
+                'Confirm MYFATOORAH_COUNTRY_CODE matches your portal (SAU → api-sa.myfatoorah.com), ' .
+                'whitelist your server public IP, and use a public HTTPS CallBackUrl (not localhost).',
                 $this->baseUrl(),
             );
         }

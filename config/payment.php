@@ -130,13 +130,13 @@ return [
             // Demo Visa/Master is typically 2 — confirm via InitiatePayment for your account.
             'payment_method_id'  => (int) env('MYFATOORAH_PAYMENT_METHOD_ID', 2),
 
-            // Vendor country code from the MyFatoorah portal (same as official
-            // package `countryCode` / `vcCode`: SAU, KWT, ARE, QAT, EGY, …).
-            // Used to pick the live regional host when sandbox=false.
-            'country_code'       => env('MYFATOORAH_COUNTRY_CODE', env('MYFATOORAH_COUNTRY_ISO')),
+            // Vendor country code from .env — picks the live host:
+            // SAU→api-sa, ARE→api-ae, QAT→api-qa, EGY→api-eg,
+            // KWT/BHR/OMN/JOR→api.myfatoorah.com. Required when sandbox=false
+            // unless MYFATOORAH_BASE_URL is set.
+            'country_code'       => env('MYFATOORAH_COUNTRY_CODE'),
 
-            // Optional explicit API host. When empty: sandbox → apitest.myfatoorah.com,
-            // live → country_code host (SAU → api-sa.myfatoorah.com, …).
+            // Optional explicit API host override (skips country_code mapping).
             'base_url'           => env('MYFATOORAH_BASE_URL'),
 
             // Same meaning as official package `isTest` (true = test mode).
