@@ -92,6 +92,25 @@ token with exactly that 401.
 4. `php artisan config:clear` (restart Octane/queue workers if used).
 5. Do **not** put `Bearer ` in the env value — the driver adds it.
 
+### Troubleshooting HTTP 400 “Invalid data”
+
+`Invalid data` is MyFatoorah's generic wrapper message; the real reason is in
+`ValidationErrors`. The driver now appends those field errors to the exception
+message, so you get e.g.:
+
+```
+Invalid data: invoiceCreate.CustomerMobile: Mobile is not valid
+```
+
+Common culprits:
+
+| Field | Requirement |
+|-------|-------------|
+| `CustomerMobile` | 3–14 digits, **without** the dialling code — the driver splits `+966501234567` into `MobileCountryCode=+966` + `CustomerMobile=501234567` and omits the number entirely when it can't be made valid |
+| `DisplayCurrencyIso` | Must be enabled on your MyFatoorah account (SAR for a Saudi account) |
+| `CallBackUrl` / `ErrorUrl` | Must be a valid absolute URL |
+| `CustomerName` / `ItemName` | Truncated to 100 chars by the driver |
+
 ---
 
 ## Capability matrix

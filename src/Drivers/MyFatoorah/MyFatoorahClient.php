@@ -85,23 +85,29 @@ final class MyFatoorahClient
     ): array {
         $amount = Money::ofMinor($request->amount->amount, $request->currency);
 
+        [$mobileCountryCode, $customerMobile] = $this->splitPhone($request->customer?->phone);
+
         $payload = array_filter(
             [
                 // Official samples / Laravel package use "Lnk" (not "LNK").
                 'NotificationOption' => 'Lnk',
                 'InvoiceValue'       => (float) $amount->toDecimalString(),
                 'DisplayCurrencyIso' => $request->currency->value,
-                'CustomerName'       => $request->customer?->name,
+                'CustomerName'       => $this->truncate($request->customer?->name, 100),
                 'CustomerEmail'      => $request->customer?->email,
-                'CustomerMobile'     => $this->digitsOnly($request->customer?->phone),
-                'Language'           => 'EN',
+                'MobileCountryCode'  => $mobileCountryCode,
+                'CustomerMobile'     => $customerMobile,
+                'Language'           => 'en',
                 'CustomerReference'  => $request->idempotencyKey,
                 'UserDefinedField'   => $request->idempotencyKey,
                 'CallBackUrl'        => $callBackUrl ?? $request->returnUrl,
                 'ErrorUrl'           => $errorUrl ?? $request->cancelUrl ?? $callBackUrl ?? $request->returnUrl,
                 'WebhookUrl'         => $webhookUrl,
                 'InvoiceItems'       => [[
-                    'ItemName'  => $request->description !== '' ? $request->description : 'Order ' . $request->idempotencyKey,
+                    'ItemName'  => $this->truncate(
+                        $request->description !== '' ? $request->description : 'Order ' . $request->idempotencyKey,
+                        100,
+                    ),
                     'Quantity'  => 1,
                     'UnitPrice' => (float) $amount->toDecimalString(),
                 ]],
@@ -134,16 +140,19 @@ final class MyFatoorahClient
         ?string $webhookUrl = null,
         array $extra = [],
     ): array {
+        [$mobileCountryCode, $mobile] = $this->splitPhone($customerMobile);
+
         $payload = array_filter(
             array_merge(
                 [
                     'PaymentMethodId'    => $paymentMethodId,
                     'InvoiceValue'       => (float) $amount->toDecimalString(),
                     'DisplayCurrencyIso' => $currencyIso,
-                    'CustomerName'       => $customerName,
+                    'CustomerName'       => $this->truncate($customerName, 100),
                     'CustomerEmail'      => $customerEmail,
-                    'CustomerMobile'     => $this->digitsOnly($customerMobile),
-                    'Language'           => 'EN',
+                    'MobileCountryCode'  => $mobileCountryCode,
+                    'CustomerMobile'     => $mobile,
+                    'Language'           => 'en',
                     'CustomerReference'  => $customerReference,
                     'UserDefinedField'   => $customerReference,
                     'CallBackUrl'        => $callBackUrl,
@@ -430,15 +439,60 @@ final class MyFatoorahClient
         return 'CustomerReference';
     }
 
-    private function digitsOnly(?string $phone): ?string
+    /**
+     * Split a phone number into MyFatoorah's `MobileCountryCode` + `CustomerMobile`.
+     *
+     * MyFatoorah validates the two parts separately and rejects the whole
+     * invoice with "Invalid data" when a dialling code is baked into
+     * `CustomerMobile`, so an international number (`+966…` / `00966…`) is
+     * split the same way the official library's helper does — the leading
+     * three digits become the country code. A plain local number is sent
+     * as-is with no country code.
+     *
+     * Numbers outside MyFatoorah's 3–14 digit range are dropped rather than
+     * failing the request, since the mobile is optional for invoice links.
+     *
+     * @return array{0: ?string, 1: ?string} [MobileCountryCode, CustomerMobile]
+     */
+    private function splitPhone(?string $phone): array
     {
         if ($phone === null || trim($phone) === '') {
+            return [null, null];
+        }
+
+        $normalised    = preg_replace('/[\s\-()]+/', '', trim($phone)) ?? '';
+        $isInternational = str_starts_with($normalised, '+') || str_starts_with($normalised, '00');
+
+        $digits = preg_replace('/\D+/', '', $normalised) ?? '';
+
+        if ($isInternational && str_starts_with($digits, '00')) {
+            $digits = substr($digits, 2);
+        }
+
+        if ($digits === '' || strlen($digits) < 3 || strlen($digits) > 14) {
+            return [null, null];
+        }
+
+        if ($isInternational && strlen(substr($digits, 3)) > 3) {
+            return ['+' . substr($digits, 0, 3), substr($digits, 3)];
+        }
+
+        return [null, $digits];
+    }
+
+    private function truncate(?string $value, int $max): ?string
+    {
+        if ($value === null) {
             return null;
         }
 
-        $digits = preg_replace('/\D+/', '', $phone);
+        $value = trim($value);
 
-        return $digits !== '' ? $digits : null;
+        if ($value === '') {
+            return null;
+        }
+
+        return mb_strlen($value) > $max ? mb_substr($value, 0, $max) : $value;
     }
 
     /**
@@ -472,22 +526,46 @@ final class MyFatoorahClient
     }
 
     /**
+     * Build a diagnostic message from a failed MyFatoorah response body.
+     *
+     * MyFatoorah pairs a generic top-level `Message` ("Invalid data") with the
+     * per-field reason in `ValidationErrors` / `FieldsErrors`, so reading
+     * `Message` first throws away the only useful part. The official library
+     * reads the field errors first — this mirrors that order, then falls back
+     * to dumping the raw body verbatim (as PaymobClient does) rather than
+     * returning a message with no diagnostic value.
+     *
      * @param array<string, mixed> $body
      */
     private function extractErrorMessage(array $body, string $operation, int $httpStatus = 0): string
     {
-        if (is_string($body['Message'] ?? null) && $body['Message'] !== '') {
-            return $body['Message'];
+        $message = is_string($body['Message'] ?? null) && $body['Message'] !== ''
+            ? $body['Message']
+            : null;
+
+        $fieldErrors = $this->extractFieldErrors($body);
+
+        if ($fieldErrors !== null) {
+            return $message !== null
+                ? "{$message}: {$fieldErrors}"
+                : "MyFatoorah {$operation} validation failed: {$fieldErrors}";
         }
 
-        $errors = $body['ValidationErrors'] ?? null;
+        $dataError = $body['Data']['ErrorMessage'] ?? null;
 
-        if (is_array($errors) && $errors !== []) {
-            return "MyFatoorah {$operation} validation failed: " . json_encode($errors, JSON_UNESCAPED_SLASHES);
+        if (is_string($dataError) && $dataError !== '') {
+            return $dataError;
+        }
+
+        if ($message !== null) {
+            // Keep the raw body when the message alone says nothing actionable.
+            return count($body) > 1
+                ? "{$message} — MyFatoorah {$operation} response: " . json_encode($body, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+                : $message;
         }
 
         if ($body !== []) {
-            return "MyFatoorah {$operation} request failed: " . json_encode($body, JSON_UNESCAPED_SLASHES);
+            return "MyFatoorah {$operation} request failed: " . json_encode($body, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
         }
 
         // MyFatoorah's own sample clients treat an empty 401 body as "API key
@@ -517,5 +595,44 @@ final class MyFatoorahClient
         }
 
         return "MyFatoorah {$operation} request failed with an empty response body.";
+    }
+
+    /**
+     * Flatten `ValidationErrors` / `FieldsErrors` into "Field: reason" pairs.
+     *
+     * Entries look like `{"Name": "invoiceCreate.InvoiceItems", "Error": "..."}`,
+     * and `Error` is sometimes empty — in that case the field name alone is the
+     * only signal available, so it is still reported.
+     *
+     * @param array<string, mixed> $body
+     */
+    private function extractFieldErrors(array $body): ?string
+    {
+        $errors = $body['ValidationErrors'] ?? $body['FieldsErrors'] ?? null;
+
+        if (! is_array($errors) || $errors === []) {
+            return null;
+        }
+
+        $pairs = [];
+
+        foreach ($errors as $error) {
+            if (! is_array($error)) {
+                continue;
+            }
+
+            $name   = is_string($error['Name'] ?? null) ? trim($error['Name']) : '';
+            $reason = is_string($error['Error'] ?? null) ? trim($error['Error']) : '';
+
+            if ($name !== '' && $reason !== '') {
+                $pairs[] = "{$name}: {$reason}";
+            } elseif ($name !== '') {
+                $pairs[] = $name;
+            } elseif ($reason !== '') {
+                $pairs[] = $reason;
+            }
+        }
+
+        return $pairs !== [] ? implode(', ', $pairs) : null;
     }
 }

@@ -119,6 +119,70 @@ final class MyFatoorahDriverTest extends TestCase
     }
 
     /** @test */
+    public function test_create_payment_link_splits_international_phone_into_country_code(): void
+    {
+        $http = $this->fakeHttp([
+            '*/v2/SendPayment' => [[
+                'IsSuccess' => true,
+                'Data'      => ['InvoiceId' => 1, 'InvoiceURL' => 'https://sa.myfatoorah.com/ie/x'],
+            ], 200],
+        ]);
+
+        $this->makeDriver()->createPaymentLink(new PaymentLinkRequest(
+            amount: Money::ofMinor(1000, Currency::SAR),
+            currency: Currency::SAR,
+            description: 'Order',
+            customer: new CustomerData('Azmy', 'a@example.com', '+966 50-123 4567'),
+            returnUrl: 'https://example.com/ok',
+            cancelUrl: null,
+            expiresAt: null,
+            idempotencyKey: 'idem-phone',
+        ));
+
+        $http->assertSent(function ($request): bool {
+            $body = $request->data();
+
+            return ($body['MobileCountryCode'] ?? null) === '+966'
+                && ($body['CustomerMobile'] ?? null) === '501234567'
+                && ($body['Language'] ?? null) === 'en';
+        });
+    }
+
+    /** @test */
+    public function test_validation_errors_are_surfaced_instead_of_generic_invalid_data(): void
+    {
+        $this->fakeHttp([
+            '*/v2/SendPayment' => [[
+                'IsSuccess'        => false,
+                'Message'          => 'Invalid data',
+                'ValidationErrors' => [
+                    ['Name' => 'invoiceCreate.CustomerMobile', 'Error' => 'Mobile is not valid'],
+                ],
+                'Data'             => null,
+            ], 400],
+        ]);
+
+        try {
+            $this->makeDriver()->createPaymentLink(new PaymentLinkRequest(
+                amount: Money::ofMinor(1000, Currency::SAR),
+                currency: Currency::SAR,
+                description: 'Order',
+                customer: new CustomerData('Azmy', 'a@example.com'),
+                returnUrl: 'https://example.com/ok',
+                cancelUrl: null,
+                expiresAt: null,
+                idempotencyKey: 'idem-invalid',
+            ));
+
+            $this->fail('Expected the driver to throw on a 400 response.');
+        } catch (\Throwable $e) {
+            $this->assertStringContainsString('Invalid data', $e->getMessage());
+            $this->assertStringContainsString('invoiceCreate.CustomerMobile', $e->getMessage());
+            $this->assertStringContainsString('Mobile is not valid', $e->getMessage());
+        }
+    }
+
+    /** @test */
     public function test_live_saudi_country_code_hits_api_sa_host(): void
     {
         $http = $this->fakeHttp([
