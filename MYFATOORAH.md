@@ -106,6 +106,7 @@ Common culprits:
 
 | Field | Requirement |
 |-------|-------------|
+| `CustomerName` | **Required.** Checkout currently may omit customer — the driver falls back to `NA Customer` (same pattern as Paymob) |
 | `CustomerMobile` | 3–14 digits, **without** the dialling code — the driver splits `+966501234567` into `MobileCountryCode=+966` + `CustomerMobile=501234567` and omits the number entirely when it can't be made valid |
 | `DisplayCurrencyIso` | Must be enabled on your MyFatoorah account (SAR for a Saudi account) |
 | `CallBackUrl` / `ErrorUrl` | Must be a valid absolute URL |

@@ -119,6 +119,34 @@ final class MyFatoorahDriverTest extends TestCase
     }
 
     /** @test */
+    public function test_create_payment_link_sends_fallback_customer_name_when_customer_missing(): void
+    {
+        $http = $this->fakeHttp([
+            '*/v2/SendPayment' => [[
+                'IsSuccess' => true,
+                'Data'      => ['InvoiceId' => 1, 'InvoiceURL' => 'https://sa.myfatoorah.com/ie/x'],
+            ], 200],
+        ]);
+
+        $this->makeDriver()->createPaymentLink(new PaymentLinkRequest(
+            amount: Money::ofMinor(1000, Currency::SAR),
+            currency: Currency::SAR,
+            description: 'Order',
+            customer: null,
+            returnUrl: 'https://example.com/ok',
+            cancelUrl: null,
+            expiresAt: null,
+            idempotencyKey: 'idem-no-customer',
+        ));
+
+        $http->assertSent(function ($request): bool {
+            $body = $request->data();
+
+            return ($body['CustomerName'] ?? null) === 'NA Customer';
+        });
+    }
+
+    /** @test */
     public function test_create_payment_link_splits_international_phone_into_country_code(): void
     {
         $http = $this->fakeHttp([

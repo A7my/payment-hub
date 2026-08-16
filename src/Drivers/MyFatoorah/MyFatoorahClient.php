@@ -87,13 +87,18 @@ final class MyFatoorahClient
 
         [$mobileCountryCode, $customerMobile] = $this->splitPhone($request->customer?->phone);
 
+        // CheckoutService currently builds PaymentLinkRequest with customer=null
+        // (same as Paymob). MyFatoorah rejects SendPayment without CustomerName,
+        // so mirror Paymob's "NA Customer" fallback rather than omitting the field.
+        $customerName = $this->truncate($request->customer?->name ?? 'NA Customer', 100);
+
         $payload = array_filter(
             [
                 // Official samples / Laravel package use "Lnk" (not "LNK").
                 'NotificationOption' => 'Lnk',
                 'InvoiceValue'       => (float) $amount->toDecimalString(),
                 'DisplayCurrencyIso' => $request->currency->value,
-                'CustomerName'       => $this->truncate($request->customer?->name, 100),
+                'CustomerName'       => $customerName,
                 'CustomerEmail'      => $request->customer?->email,
                 'MobileCountryCode'  => $mobileCountryCode,
                 'CustomerMobile'     => $customerMobile,
@@ -148,7 +153,7 @@ final class MyFatoorahClient
                     'PaymentMethodId'    => $paymentMethodId,
                     'InvoiceValue'       => (float) $amount->toDecimalString(),
                     'DisplayCurrencyIso' => $currencyIso,
-                    'CustomerName'       => $this->truncate($customerName, 100),
+                    'CustomerName'       => $this->truncate($customerName ?? 'NA Customer', 100),
                     'CustomerEmail'      => $customerEmail,
                     'MobileCountryCode'  => $mobileCountryCode,
                     'CustomerMobile'     => $mobile,
