@@ -137,10 +137,14 @@ return [
             'country_code'       => env('MYFATOORAH_COUNTRY_CODE'),
 
             // Optional explicit API host override (skips country_code mapping).
+            // Prefer leaving this empty — use country_code + sandbox instead.
             'base_url'           => env('MYFATOORAH_BASE_URL'),
 
-            // Same meaning as official package `isTest` (true = test mode).
-            'sandbox'            => env('PAYMENT_SANDBOX', true),
+            // Same meaning as official package `isTest` (true → apitest).
+            // Prefer MYFATOORAH_SANDBOX so MyFatoorah can stay live while
+            // Stripe/Paymob keep using PAYMENT_SANDBOX=true (their test mode
+            // is encoded in the API key itself; MyFatoorah's is the host).
+            'sandbox'            => env('MYFATOORAH_SANDBOX', env('PAYMENT_SANDBOX', true)),
             'timeout'            => (int) env('PAYMENT_TIMEOUT', 30),
         ],
 

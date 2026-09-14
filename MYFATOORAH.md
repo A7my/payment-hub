@@ -52,13 +52,23 @@ Map from the official MyFatoorah Laravel package:
 
 ```env
 PAYMENT_DRIVER=myfatoorah
-MYFATOORAH_API_KEY=...
-PAYMENT_SANDBOX=false
-MYFATOORAH_COUNTRY_CODE=SAU     # required for live — selects host from the map below
+MYFATOORAH_API_KEY=...                    # test key ↔ sandbox true; live key ↔ sandbox false
+MYFATOORAH_SANDBOX=true                   # preferred; falls back to PAYMENT_SANDBOX
+MYFATOORAH_COUNTRY_CODE=SAU               # required when sandbox=false
 MYFATOORAH_WEBHOOK_SECRET=...
 MYFATOORAH_PAYMENT_METHOD_ID=2
-# MYFATOORAH_BASE_URL=          # optional override; leave empty to use country_code
+# Do NOT set MYFATOORAH_BASE_URL — host is derived from sandbox + country_code
 ```
+
+Why Stripe/Paymob can “work in test” while MyFatoorah 401s: Stripe (`sk_test_`) and
+Paymob (`sau_sk_test_`) encode the environment **in the key**. MyFatoorah encodes it
+**in the host** (`apitest` vs `api-sa`). A live SAU token against `apitest` (or a
+dead/docs sample token) returns HTTP 401 with an empty body.
+
+| `MYFATOORAH_SANDBOX` / `PAYMENT_SANDBOX` | Host |
+|------------------------------------------|------|
+| `true` | `https://apitest.myfatoorah.com` (any country) |
+| `false` + country below | regional live host |
 
 | `MYFATOORAH_COUNTRY_CODE` | Live host |
 |---------------------------|-----------|
@@ -67,7 +77,6 @@ MYFATOORAH_PAYMENT_METHOD_ID=2
 | `QAT` | `https://api-qa.myfatoorah.com` |
 | `EGY` | `https://api-eg.myfatoorah.com` |
 | `KWT` / `BHR` / `OMN` / `JOR` | `https://api.myfatoorah.com` |
-| *(any, when `PAYMENT_SANDBOX=true`)* | `https://apitest.myfatoorah.com` |
 
 Auth on every call: `Authorization: Bearer {api_key}`.
 
