@@ -1,6 +1,6 @@
 # Laravel Payment Hub
 
-A provider-agnostic payment framework for Laravel 12+ / PHP 8.4+, built around
+A provider-agnostic payment framework for Laravel 10+ / PHP 8.2+, built around
 the Strategy pattern: switch payment providers via config, not application
 code. Stripe, Paymob, and MyFatoorah are built in today; PayPal is planned
 but **not yet implemented** — see [Status](#status) below.
@@ -670,9 +670,10 @@ repository block, submit this repo to [Packagist](https://packagist.org):
 1. **Public GitHub repo** — `https://github.com/A7my/payment-hub` must be public.
 2. **Create a release tag** (Packagist needs at least one tag for stable installs):
    ```bash
-   git tag v1.0.0
-   git push origin v1.0.0
+   git tag v1.0.1
+   git push origin v1.0.1
    ```
+   Supported frameworks: Laravel **10 / 11 / 12 / 13** (`laravel/framework: ^10|^11|^12|^13`), PHP **^8.2**.
 3. **Register on Packagist** — sign in at [packagist.org](https://packagist.org) with GitHub.
 4. **Submit package** — paste `https://github.com/A7my/payment-hub` and confirm.
 5. **Enable auto-update** — on the package page, set up the GitHub webhook so
