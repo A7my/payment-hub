@@ -19,6 +19,11 @@
             "email": "dev@mifatoyeh.com"
         }
     ],
+    "homepage": "https://github.com/A7my/payment-hub",
+    "support": {
+        "issues": "https://github.com/A7my/payment-hub/issues",
+        "source": "https://github.com/A7my/payment-hub"
+    },
     "require": {
         "php": "^8.4",
         "laravel/framework": "^12.0",

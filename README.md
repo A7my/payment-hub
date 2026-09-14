@@ -7,13 +7,16 @@ but **not yet implemented** — see [Status](#status) below.
 
 ## Install
 
-**From Packagist** (once published):
-
 ```bash
 composer require a7my/payment-hub
 ```
 
-**From GitHub** (VCS — add to your app's `composer.json` first):
+No `repositories` block needed — the package is on [Packagist](https://packagist.org/packages/a7my/payment-hub).
+
+<details>
+<summary>Install from GitHub directly (before Packagist, or for unreleased commits)</summary>
+
+Add to your app's `composer.json`:
 
 ```json
 "repositories": [
@@ -25,9 +28,10 @@ composer require a7my/payment-hub
 ```
 
 ```bash
-composer require a7my/payment-hub
-composer update a7my/payment-hub
+composer require a7my/payment-hub:dev-main
 ```
+
+</details>
 
 **Publish config & migrations:**
 
@@ -657,6 +661,24 @@ MyFatoorah-specific notes:
 - `saveCard()` / `chargeToken()` / subscriptions are permanently unsupported.
 - For webview checkout, MyFatoorah uses `CallBackUrl` (package callback route);
   webhooks are for sdk-mode intents — see [`CHECKOUT.md`](CHECKOUT.md).
+
+## Publishing (maintainers)
+
+To make `composer require a7my/payment-hub` work for everyone without a VCS
+repository block, submit this repo to [Packagist](https://packagist.org):
+
+1. **Public GitHub repo** — `https://github.com/A7my/payment-hub` must be public.
+2. **Create a release tag** (Packagist needs at least one tag for stable installs):
+   ```bash
+   git tag v1.0.0
+   git push origin v1.0.0
+   ```
+3. **Register on Packagist** — sign in at [packagist.org](https://packagist.org) with GitHub.
+4. **Submit package** — paste `https://github.com/A7my/payment-hub` and confirm.
+5. **Enable auto-update** — on the package page, set up the GitHub webhook so
+   new tags/commits sync automatically.
+
+After that, anyone can run `composer require a7my/payment-hub` with no extra config.
 
 ## License
 
