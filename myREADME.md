@@ -203,7 +203,7 @@ class User extends Authenticatable implements JWTSubject, Payable , CapturesChec
 
 ```
 
-### RUN THIS
+### 3. RUN THIS
 
 http://127.0.0.1:8000/payment/checkout
 
@@ -216,3 +216,30 @@ http://127.0.0.1:8000/payment/checkout
     "cancel_url": "https://www.google.com/",
     "os" : "web"
 }
+
+
+
+### 4. What In .ENV
+
+Never commit real keys — use placeholders in docs; put secrets only in `.env`.
+
+```env
+PAYMENT_CHECKOUT_PERSIST_TRANSACTIONS=true
+
+PAYMOB_API_KEY=your-paymob-api-key
+PAYMOB_SECRET_KEY=your-paymob-secret-key
+PAYMOB_PUBLIC_KEY=your-paymob-public-key
+PAYMOB_HMAC_SECRET=your-hmac-secret
+PAYMOB_INTEGRATION_ID=12345
+PAYMOB_APPLE_PAY_INTEGRATION_ID=
+PAYMOB_IFRAME_ID=
+PAYMOB_BASE_URL=https://ksa.paymob.com/api
+PAYMENT_DRIVER=paymob
+
+STRIPE_KEY=your-stripe-publishable-key
+STRIPE_SECRET=your-stripe-secret-key
+
+MYFATOORAH_API_KEY=your-myfatoorah-api-token
+MYFATOORAH_SANDBOX=true
+MYFATOORAH_COUNTRY_CODE=SAU
+```
