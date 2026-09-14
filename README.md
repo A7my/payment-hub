@@ -7,18 +7,98 @@ but **not yet implemented** — see [Status](#status) below.
 
 ## Install
 
+**From Packagist** (once published):
+
 ```bash
 composer require a7my/payment-hub
+```
+
+**From GitHub** (VCS — add to your app's `composer.json` first):
+
+```json
+"repositories": [
+    {
+        "type": "vcs",
+        "url": "https://github.com/A7my/payment-hub"
+    }
+]
+```
+
+```bash
+composer require a7my/payment-hub
+composer update a7my/payment-hub
+```
+
+**Publish config & migrations:**
+
+```bash
 php artisan vendor:publish --tag=payment-config
+php artisan vendor:publish --tag=payment-migrations
+php artisan migrate
 ```
 
-Set your provider credentials in `.env`:
+Set provider credentials in `.env` — see [Environment variables](#environment-variables) below.
+Never commit real keys; use placeholders in docs and keep secrets in `.env` only.
 
+## Environment variables
+
+Shared:
+
+```env
+PAYMENT_DRIVER=stripe          # default driver when Payment::charge() has no driver()
+PAYMENT_SANDBOX=true           # shared test flag (Stripe, Paymob); see MyFatoorah below
+PAYMENT_CHECKOUT_PERSIST_TRANSACTIONS=true
 ```
-STRIPE_KEY=pk_test_...
-STRIPE_SECRET=sk_test_...
-STRIPE_WEBHOOK_SECRET=whsec_...
+
+**Stripe** — test mode is encoded in the key (`sk_test_…` / `pk_test_…`):
+
+```env
+STRIPE_KEY=your-stripe-publishable-key
+STRIPE_SECRET=your-stripe-secret-key
+STRIPE_WEBHOOK_SECRET=your-stripe-webhook-secret
 ```
+
+**Paymob (KSA)** — test mode is encoded in the key (`sau_sk_test_…` / `sau_pk_test_…`):
+
+```env
+PAYMOB_API_KEY=your-paymob-api-key
+PAYMOB_SECRET_KEY=your-paymob-secret-key
+PAYMOB_PUBLIC_KEY=your-paymob-public-key
+PAYMOB_HMAC_SECRET=your-hmac-secret
+PAYMOB_INTEGRATION_ID=12345
+PAYMOB_BASE_URL=https://ksa.paymob.com/api
+```
+
+**MyFatoorah** — test mode is the **host** (`apitest` vs `api-sa`), not the key prefix.
+Use `MYFATOORAH_SANDBOX` so MyFatoorah can stay live while Stripe/Paymob stay on test keys:
+
+```env
+MYFATOORAH_API_KEY=your-myfatoorah-api-token
+MYFATOORAH_SANDBOX=true         # true → apitest.myfatoorah.com; false → regional live host
+MYFATOORAH_COUNTRY_CODE=SAU     # SAU, ARE, QAT, EGY, KWT, BHR, OMN, JOR — required when live
+MYFATOORAH_WEBHOOK_SECRET=your-webhook-secret
+MYFATOORAH_PAYMENT_METHOD_ID=2
+# Do NOT set MYFATOORAH_BASE_URL unless you need an explicit host override
+```
+
+| `MYFATOORAH_COUNTRY_CODE` | Live host |
+|---------------------------|-----------|
+| `SAU` | `https://api-sa.myfatoorah.com` |
+| `ARE` / `QAT` / `EGY` | `api-ae` / `api-qa` / `api-eg` |
+| `KWT` / `BHR` / `OMN` / `JOR` | `https://api.myfatoorah.com` |
+
+After changing `.env`: `php artisan config:clear`.
+
+## Driver reference docs
+
+Provider-specific details (webhooks, callbacks, env quirks) live in separate files:
+
+| Driver | Reference |
+|--------|-----------|
+| Stripe | [`STRIPE.md`](STRIPE.md) |
+| Paymob | [`PAYMOB.md`](PAYMOB.md) |
+| MyFatoorah | [`MYFATOORAH.md`](MYFATOORAH.md) |
+| Checkout (sdk, confirm, callbacks) | [`CHECKOUT.md`](CHECKOUT.md) |
 
 ## Core concepts
 
@@ -49,11 +129,10 @@ STRIPE_WEBHOOK_SECRET=whsec_...
 This is how you call **any** driver — the calling code below is not
 Stripe-specific. Every array key, method name, and response method
 (`isSuccessful()`, `getStatus()`, …) is identical no matter which provider is
-configured; only what happens *behind* the call differs per provider. The
-examples use Stripe purely because it's the only driver implemented so far
-(see [Status](#status)) — the exact same code will work unchanged against
-`paypal`, `paymob`, or `myfatoorah` once those land, just by changing the
-driver name (or nothing at all, if you rely on the default).
+configured; only what happens *behind* the call differs per provider. Switch
+providers by changing `Payment::driver('…')` or `PAYMENT_DRIVER` in `.env` —
+no application code changes required. Stripe, Paymob, and MyFatoorah are
+built in today (see [Status](#status)).
 
 ```php
 use Mifatoyeh\LaravelPaymentFramework\Facades\Payment;
@@ -331,12 +410,114 @@ rows), skip the trait and implement `getPaymentAmount()`/`getPaymentCurrency()`
 yourself — they just need to return `Money`/`Currency` values, however you
 get there.
 
+**Example — `Package` with a stored price in major units (SAR):**
+
+```php
+use Mifatoyeh\LaravelPaymentFramework\Contracts\Payable;
+use Mifatoyeh\LaravelPaymentFramework\Concerns\IsPayable;
+use Mifatoyeh\LaravelPaymentFramework\Enums\Currency;
+use Mifatoyeh\LaravelPaymentFramework\ValueObjects\Money;
+
+class Package extends Model implements Payable
+{
+    use IsPayable;
+
+    public function getPaymentAmount(): Money
+    {
+        // price is stored in major units (e.g. 40.00 SAR) — convert to halalas
+        $minor = (int) round((float) $this->price * 100);
+
+        return Money::ofMinor(max($minor, 1), Currency::SAR);
+    }
+
+    public function getPaymentCurrency(): Currency
+    {
+        return Currency::SAR;
+    }
+
+    public function getSupportedPaymentDrivers(): array
+    {
+        return ['stripe', 'paymob', 'myfatoorah'];
+    }
+
+    public function authorizePayment(?Authenticatable $payer): bool
+    {
+        return $payer !== null;
+    }
+}
+```
+
+**Optional — snapshot data at checkout time** (`CapturesCheckoutContext`):
+
+Some values only exist during the original `POST /payment/checkout` call (a
+locked-in price, a discount code). Implement `captureCheckoutContext()` to
+persist them into the pending transaction; read them back in
+`onPaymentCompleted()` via `$context->get('key')` or `$context->payer()`.
+
+```php
+use Mifatoyeh\LaravelPaymentFramework\Contracts\CapturesCheckoutContext;
+use Mifatoyeh\LaravelPaymentFramework\Checkout\CheckoutContext;
+use Mifatoyeh\LaravelPaymentFramework\Enums\PaymentStatus;
+use Mifatoyeh\LaravelPaymentFramework\Responses\StatusResponse;
+
+class Package extends Model implements Payable, CapturesCheckoutContext
+{
+    // ... getPaymentAmount(), etc.
+
+    public function captureCheckoutContext(): array
+    {
+        return [
+            'price' => $this->price,
+            // JSON-serialisable scalars/arrays only — not Eloquent models
+        ];
+    }
+
+    public function onPaymentCompleted(StatusResponse $status, CheckoutContext $context): void
+    {
+        if (! $status->isSuccessful() || $status->getStatus() !== PaymentStatus::Captured) {
+            return;
+        }
+
+        $transactionId = $status->getTransactionId()->toString();
+
+        // Idempotent — webhooks and confirm() can both fire
+        if (Transaction::where('transaction_id', $transactionId)->exists()) {
+            return;
+        }
+
+        $payer = $context->payer();
+        if ($payer === null) {
+            return;
+        }
+
+        Transaction::create([
+            'transaction_id' => $transactionId,
+            'user_id'        => $payer->getAuthIdentifier(),
+            'package_id'     => $this->id,
+            'amount'         => $context->get('price', $this->price),
+            'payment_method' => $context->driver,
+        ]);
+    }
+}
+```
+
+See [`CHECKOUT.md`](CHECKOUT.md) for confirmation flows (callback, webhook,
+`confirm()`), and the app-wide `CheckoutPaymentConfirmed` event.
+
 ### 2. Register it in config
 
 ```php
 // config/payment.php
 'payables' => [
-    'order' => \App\Models\Order::class,
+    'order'   => \App\Models\Order::class,
+    'package' => \App\Models\Package::class,
+],
+
+'checkout' => [
+    'enabled'    => env('PAYMENT_CHECKOUT_ENABLED', true),
+    'route'      => env('PAYMENT_CHECKOUT_ROUTE', 'payment/checkout'),
+    // Default is ['web', 'auth'] — use API auth for SPA/mobile backends:
+    'middleware' => ['api', 'auth:api'],
 ],
 ```
 
@@ -351,17 +532,49 @@ attempt.
 POST /payment/checkout
 ```
 
+**Stripe (webview + web — package handles callback redirect):**
+
 ```json
 {
-  "model_type": "order",
-  "model_id": "123",
+  "model_type": "package",
+  "model_id": "3",
   "driver": "stripe",
   "driver_type": "webview",
   "os": "web",
-  "return_url": "https://example.com/success",
-  "cancel_url": "https://example.com/cancel"
+  "return_url": "https://your-app.com/payment/success",
+  "cancel_url": "https://your-app.com/payment/cancel"
 }
 ```
+
+**Paymob (KSA):**
+
+```json
+{
+  "model_type": "package",
+  "model_id": "3",
+  "driver": "paymob",
+  "driver_type": "webview",
+  "os": "web",
+  "return_url": "https://your-app.com/payment/success",
+  "cancel_url": "https://your-app.com/payment/cancel"
+}
+```
+
+**MyFatoorah (Saudi):**
+
+```json
+{
+  "model_type": "package",
+  "model_id": "3",
+  "driver": "myfatoorah",
+  "driver_type": "webview",
+  "os": "web",
+  "return_url": "https://your-app.com/payment/success",
+  "cancel_url": "https://your-app.com/payment/cancel"
+}
+```
+
+The request body shape is identical for every driver — only `"driver"` changes.
 
 - **`model_type`** — the key you used in `payment.payables` (`"order"` above), not a class name.
 - **`model_id`** — the record's primary key.
@@ -398,22 +611,11 @@ second step, not an optional extra.
 
 ### Route configuration
 
-```php
-// config/payment.php
-'checkout' => [
-    'enabled'    => env('PAYMENT_CHECKOUT_ENABLED', true),
-    'route'      => env('PAYMENT_CHECKOUT_ROUTE', 'payment/checkout'),
-    'middleware' => ['web', 'auth'],
-],
-```
-
-Change `route` if `/payment/checkout` collides with something in your app, or
-set `enabled` to `false` to turn the auto-registered route off entirely (e.g.
-if you want to register it yourself with different middleware). The default
-`middleware` includes `auth`, but don't rely on that alone — `authorizePayment()`
-is checked by the controller itself regardless of what middleware ends up in
-front of the route, specifically so a middleware misconfiguration in your app
-doesn't silently turn into an authorization bypass.
+Configured under `payment.checkout` in step 2 above. Change `route` if
+`/payment/checkout` collides with something in your app, or set `enabled` to
+`false` to register the route yourself. Don't rely on middleware alone —
+`authorizePayment()` is always checked by the controller regardless of route
+middleware.
 
 ## Events
 
@@ -447,6 +649,14 @@ Two things worth knowing about Paymob specifically before relying on it:
 - `createSubscription()`/`cancelSubscription()` are permanently unsupported,
   not just unimplemented — Paymob has no recurring-billing API resembling
   Stripe's Subscription object.
+
+MyFatoorah-specific notes:
+- Test vs live is determined by **host** (`MYFATOORAH_SANDBOX` / `PAYMENT_SANDBOX`
+  → `apitest`), not by a key prefix like Stripe/Paymob — see
+  [`MYFATOORAH.md`](MYFATOORAH.md).
+- `saveCard()` / `chargeToken()` / subscriptions are permanently unsupported.
+- For webview checkout, MyFatoorah uses `CallBackUrl` (package callback route);
+  webhooks are for sdk-mode intents — see [`CHECKOUT.md`](CHECKOUT.md).
 
 ## License
 
